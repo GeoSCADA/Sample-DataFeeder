@@ -6,9 +6,12 @@ using System.IO;
 using DataFeeder;
 using Newtonsoft.Json; // Bring in with nuget
 
-// Test and demo app for the FeederEngine and PointInfo classes
-// This app writes output data in JSON format in files with a defined size.
+// Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
+// This app writes output data in JSON format to Azure IoT with a defined size.
 // It can easily be modified to change the format or output destination.
+
+// Azure IoT Code from: https://github.com/Azure-Samples/azure-iot-samples-csharp/tree/master/iot-hub/Samples/device/DeviceReconnectionSample
+
 namespace DataFeederApp
 {
 
@@ -171,7 +174,7 @@ namespace DataFeederApp
 		{
 			// Make a filename from the base by adding date/time text
 			DateTimeOffset Now = DateTimeOffset.UtcNow;
-			Directory.CreateDirectory( Path.GetDirectoryName(FileBaseName));
+			Directory.CreateDirectory(Path.GetDirectoryName(FileBaseName));
 			string DatedFileName = Path.GetDirectoryName(FileBaseName) + "\\" + Path.GetFileNameWithoutExtension(FileBaseName) + Now.ToString("-yyyy-MM-dd-HH-mm-ss-fff") + Path.GetExtension(FileBaseName);
 			ExportStream = new StreamWriter(DatedFileName);
 			ExportStream.WriteLine("{\"data\":["); // Wrap individual items as an array
@@ -232,11 +235,11 @@ namespace DataFeederApp
 				ExtendedQuality = ((int)(Quality) / 256)
 			};
 			string json = JsonConvert.SerializeObject(DataUpdate);
-			
+
 			ExportStream_WriteLine(json);
 
 		}
-		
+
 		/// <summary>
 		/// Write out received configuration data
 		/// </summary>
@@ -256,7 +259,7 @@ namespace DataFeederApp
 			string json = JsonConvert.SerializeObject(ConfigUpdate);
 			ExportStream_WriteLine(json);
 		}
-		
+
 		/// <summary>
 		/// Called when server state changes from Main or Standby, this stops all monitoring
 		/// </summary>
@@ -265,14 +268,14 @@ namespace DataFeederApp
 			Console.WriteLine("Engine Shutdown");
 			Continue = false;
 		}
-		
+
 		/// <summary>
 		/// Callback used to filter new points being added to configuration
 		/// In this case we say yes to all newly configured points
 		/// </summary>
 		/// <param name="FullName">Of the point (or accumulator)</param>
 		/// <returns>True to start watching this point</returns>
-		public static bool FilterNewPoint( string FullName)
+		public static bool FilterNewPoint(string FullName)
 		{
 			return true;
 		}
