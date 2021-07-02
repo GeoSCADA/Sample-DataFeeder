@@ -5,12 +5,16 @@ using ClearScada.Client.Advanced;
 using System.IO;
 using DataFeeder;
 using Newtonsoft.Json; // Bring in with nuget
+using Azure.Messaging.EventHubs;
+using Azure.Messaging.EventHubs.Producer;
+using System.Collections.Concurrent;
+
 
 // Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
-// This app writes output data in JSON format to Azure IoT with a defined size.
+// This app writes output data in JSON format to Azure Event Hub.
 // It can easily be modified to change the format or output destination.
 
-// Azure IoT Code from: https://github.com/Azure-Samples/azure-iot-samples-csharp/tree/master/iot-hub/Samples/device/DeviceReconnectionSample
+// Azure Event Hubs: https://docs.microsoft.com/en-us/samples/azure/azure-sdk-for-net/azuremessagingeventhubs-samples/
 
 namespace DataFeederApp
 {
@@ -30,20 +34,29 @@ namespace DataFeederApp
 		// Setting this shorter will impact performance. Do not use less than 30 seconds, that is not sensible.
 		// If you have a mix of historic and non-historic points then consider modifying the library to read
 		// from each at different intervals.
-		private static int UpdateIntervalSec = 60;
+		private static int UpdateIntervalSec = 5;
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
 
 		// Performance counts
 		public static long UpdateCount = 0;
-
-		// Test data file for output of historic, current or configuration data
-		private static string FileBaseName = @"Feeder\ExportData.txt";
-		private static StreamWriter ExportStream;
+		public static long BatchCount = 0;
 
 		// Global node and Geo SCADA server connection -- using ClearScada.Client.Advanced;
 		private static ServerNode node;
 		private static IServer AdvConnection;
+
+		// connection string to the Event Hubs namespace - replace this with your key
+		private const string connectionString = "Endpoint=sb://mygscada.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=hUiuhIuhUIhNHOFiTYrVrTyirTRYirRtiyTr=";
+
+		// name of the event hub - replace this with your hub name
+		private const string eventHubName = "geoscadaeh";
+
+		private static ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
+
+		// The Event Hubs client types are safe to cache and use as a singleton for the lifetime
+		// of the application, which is best practice when events are being published or read regularly.
+		static EventHubProducerClient producerClient;
 
 		/// <summary>
 		/// Demo program showing simple data subscription and feed
@@ -52,6 +65,10 @@ namespace DataFeederApp
 		/// <returns></returns>
 		async static Task Main(string[] args)
 		{
+			// Azure Connection
+			// Create a producer client that you can use to send events to an event hub
+			producerClient = new EventHubProducerClient(connectionString, eventHubName);
+
 			// Geo SCADA Connection
 			node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
 			AdvConnection = node.Connect("Utility", false);
@@ -66,7 +83,7 @@ namespace DataFeederApp
 			Console.WriteLine("Logged on.");
 
 			// Set up connection, read rate and the callback function/action for data processing
-			if (!FeederEngine.Connect(AdvConnection, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
+			if (!FeederEngine.Connect(AdvConnection, true, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
 				Console.WriteLine("Not connected");
 				return;
@@ -74,7 +91,7 @@ namespace DataFeederApp
 			Console.WriteLine("Connect to Feeder Engine.");
 
 			// For writing data
-			CreateExportFileStream();
+			CreateExportString();
 
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
@@ -91,6 +108,7 @@ namespace DataFeederApp
 			double ProcTime = 0;
 			int LastQueue = 0;
 			int HighWaterQueue = 0;
+			int BatchCount = 0;
 			do
 			{
 				// Check time and cause processing/export
@@ -111,18 +129,57 @@ namespace DataFeederApp
 				if (PC > LastQueue)
 				{
 					// Gone up - more than last time?
-					if (PC > HighWaterQueue && PC > 100)
+					if (PC > HighWaterQueue && PC > 100 && HighWaterQueue != 0)
 					{
 						Console.WriteLine("*** High water mark increasing, queue not being processed quickly, consider increasing update interval.");
 						HighWaterQueue = PC;
 					}
 				}
 				LastQueue = PC;
+
+				await SendToAzureEventHub();
+
 			} while (Continue);
+
+			// Flush remaining data.
+			CloseOpenExportString();
+			await SendToAzureEventHub();
+			await producerClient.DisposeAsync(); // May execute this when terminating
+		}
+
+		private static async Task SendToAzureEventHub()
+		{
+			// Dequeue to Azure
+			while (OutputQueue.Count > 0)
+			{
+				if (OutputQueue.TryDequeue(out String update))
+				{
+					// Create a batch of events 
+					var eventBatch = await producerClient.CreateBatchAsync();
+					//EventDataBatch eventBatch = EventBatchTask.Result;
+
+					if (!eventBatch.TryAdd(new Azure.Messaging.EventHubs.EventData(System.Text.Encoding.UTF8.GetBytes(update))))
+					{
+						// if it is too large for the batch
+						throw new Exception($"Event is too large for the batch and cannot be sent.");
+					}
+					try
+					{
+						// Use the producer client to send the batch of events to the event hub
+						await producerClient.SendAsync(eventBatch);
+						BatchCount++;
+						Console.WriteLine("Batch of data published: " + BatchCount.ToString());
+					}
+					catch (Exception e)
+					{
+						Console.WriteLine("*** Error sending events: " + e.Message);
+					}
+				}
+			}
 		}
 
 		/// <summary>
-		/// List recursively all point objects in all groups
+		/// List recursively all point objects in all sub-groups
 		/// Declared with async to include a delay letting other database tasks work
 		/// </summary>
 		/// <param name="group"></param>
@@ -170,40 +227,39 @@ namespace DataFeederApp
 			}
 		}
 
-		public static void CreateExportFileStream()
+		// For Azure EventHub we have a simple string, appended for new data and 
+		static string ExportString = "";
+		static int StringCount = 0;
+		public static void CreateExportString()
 		{
-			// Make a filename from the base by adding date/time text
-			DateTimeOffset Now = DateTimeOffset.UtcNow;
-			Directory.CreateDirectory(Path.GetDirectoryName(FileBaseName));
-			string DatedFileName = Path.GetDirectoryName(FileBaseName) + "\\" + Path.GetFileNameWithoutExtension(FileBaseName) + Now.ToString("-yyyy-MM-dd-HH-mm-ss-fff") + Path.GetExtension(FileBaseName);
-			ExportStream = new StreamWriter(DatedFileName);
-			ExportStream.WriteLine("{\"data\":["); // Wrap individual items as an array
-			ExportStreamBytesWritten = 11;
+			StringCount++;
+			ExportString = "{\"dataTime\":\"" + DateTimeOffset.UtcNow.ToString() + "." + DateTimeOffset.UtcNow.ToString("fff") + "\",\"data\":["; // Wrap individual items as an array
 		}
 
-		public static void CloseOpenExportFileStream()
+		public static void CloseOpenExportString()
 		{
-			ExportStream.WriteLine("]}");
-			ExportStream.Close();
-			CreateExportFileStream();
+			ExportString += "]}";
+
+			Console.WriteLine(ExportString.Substring(0, 80) + "...");
+			OutputQueue.Enqueue(ExportString);
+
+			// Start gathering next
+			CreateExportString();
 		}
 
-		static int ExportStreamBytesWritten = 0;
-
-		public static void ExportStream_WriteLine(string Out)
+		public static void ExportString_WriteLine(string Out)
 		{
-			// Create a new file after <4K (e.g. billed message size of Azure IoT)
-			if (ExportStreamBytesWritten > 4000)
+			// Create a new file after <4K (e.g. billed message size of Azure)
+			if (ExportString.Length > 80000)
 			{
-				CloseOpenExportFileStream();
+				CloseOpenExportString();
 			}
 			// Don't write a comma in the first entry
-			if (ExportStreamBytesWritten > 12)
+			if (ExportString.Length > 55)
 			{
-				ExportStream.Write(",");
+				ExportString += ",";
 			}
-			ExportStreamBytesWritten += Out.Length + 3;
-			ExportStream.WriteLine(Out);
+			ExportString += Out;
 		}
 
 		/// <summary>
@@ -236,7 +292,7 @@ namespace DataFeederApp
 			};
 			string json = JsonConvert.SerializeObject(DataUpdate);
 
-			ExportStream_WriteLine(json);
+			ExportString_WriteLine(json);
 
 		}
 
@@ -248,7 +304,9 @@ namespace DataFeederApp
 		/// <param name="PointName"></param>
 		public static void ProcessNewConfig(string UpdateType, int Id, string PointName)
 		{
-			// Could add further code to get point configuration fields and types to export, e.g. GPS locations, analogue range, digital states etc.
+			// Could add further code to get point configuration fields and types to export, 
+			// e.g. GPS locations, analogue range, digital states etc.
+			// Note that this would increase start time and database load during start.
 			var ConfigUpdate = new ConfigChange
 			{
 				PointId = Id,
@@ -257,7 +315,7 @@ namespace DataFeederApp
 				Timestamp = DateTimeOffset.UtcNow
 			};
 			string json = JsonConvert.SerializeObject(ConfigUpdate);
-			ExportStream_WriteLine(json);
+			ExportString_WriteLine(json);
 		}
 
 		/// <summary>

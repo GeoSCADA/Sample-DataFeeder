@@ -5,7 +5,9 @@ VisualStudioVersion = 16.0.30804.86
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataFeeder", "DataFeeder\DataFeeder.csproj", "{69CF359C-F09F-4253-9DB8-1AE79A22AF3E}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataFeederAzureIoT", "DataFeederAzureIoT\DataFeederAzureIoT.csproj", "{A6161A52-0EE9-44C7-BEF5-5A0C905574CD}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataFeederAzureEventHub", "DataFeederAzureIoT\DataFeederAzureEventHub.csproj", "{A6161A52-0EE9-44C7-BEF5-5A0C905574CD}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "FeederEngine", "FeederEngine\FeederEngine.csproj", "{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -21,6 +23,10 @@ Global
 		{A6161A52-0EE9-44C7-BEF5-5A0C905574CD}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A6161A52-0EE9-44C7-BEF5-5A0C905574CD}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{A6161A52-0EE9-44C7-BEF5-5A0C905574CD}.Release|Any CPU.Build.0 = Release|Any CPU
+		{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

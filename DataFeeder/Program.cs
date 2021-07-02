@@ -63,7 +63,7 @@ namespace DataFeederApp
 			Console.WriteLine("Logged on.");
 
 			// Set up connection, read rate and the callback function/action for data processing
-			if (!FeederEngine.Connect(AdvConnection, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
+			if (!FeederEngine.Connect(AdvConnection, true, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
 				Console.WriteLine("Not connected");
 				return;
@@ -108,7 +108,7 @@ namespace DataFeederApp
 				if (PC > LastQueue)
 				{
 					// Gone up - more than last time?
-					if (PC > HighWaterQueue && PC > 100)
+					if (PC > HighWaterQueue && PC > 100 && HighWaterQueue != 0)
 					{
 						Console.WriteLine("*** High water mark increasing, queue not being processed quickly, consider increasing update interval.");
 						HighWaterQueue = PC;
@@ -245,7 +245,9 @@ namespace DataFeederApp
 		/// <param name="PointName"></param>
 		public static void ProcessNewConfig(string UpdateType, int Id, string PointName)
 		{
-			// Could add further code to get point configuration fields and types to export, e.g. GPS locations, analogue range, digital states etc.
+			// Could add further code to get point configuration fields and types to export, 
+			// e.g. GPS locations, analogue range, digital states etc.
+			// Note that this would increase start time and database load during start.
 			var ConfigUpdate = new ConfigChange
 			{
 				PointId = Id,

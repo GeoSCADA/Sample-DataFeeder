@@ -31,6 +31,8 @@ namespace DataFeeder
 	
 		public static int UpdateIntervalSec; // Used for all points added to the engine
 
+		private static bool UpdateConfigurationOnStart;
+
 		private static Action<string, int, string, double, DateTimeOffset, int> ProcessNewData;
 		private static Action<string, int, string> ProcessNewConfig;
 		private static Action Shutdown;
@@ -40,6 +42,7 @@ namespace DataFeeder
 		/// Acts as the initialiser/constructor
 		/// </summary>
 		/// <param name="_AdvConnection">Database connection</param>
+		/// <param name="_UpdateConfigurationOnStart">If true, send a config message for each point added.</param>
 		/// <param name="_UpdateIntervalSec">See strong warnings in sample about setting this too low.</param>
 		/// <param name="_ProcessNewData">Callback</param>
 		/// <param name="_ProcessNewConfig">Callback</param>
@@ -47,6 +50,7 @@ namespace DataFeeder
 		/// <param name="_FilterNewPoint">Callback</param>
 		/// <returns></returns>
 		public static bool Connect(IServer _AdvConnection,
+									bool _UpdateConfigurationOnStart,
 									int _UpdateIntervalSec,
 									Action<string, int, string, double, DateTimeOffset, int> _ProcessNewData,
 									Action<string, int, string> _ProcessNewConfig,
@@ -55,6 +59,7 @@ namespace DataFeeder
 		{
 			AdvConnection = _AdvConnection;
 			UpdateIntervalSec = _UpdateIntervalSec;
+			UpdateConfigurationOnStart = _UpdateConfigurationOnStart;
 
 			// Check server is valid
 			CurrentServerState = AdvConnection.GetServerState().State;
@@ -136,6 +141,10 @@ namespace DataFeeder
 			bool s = PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, FullName, UpdateIntervalSec, LastChange, AdvConnection, ProcessNewData));
 			if (s)
 			{
+				if (UpdateConfigurationOnStart)
+				{
+					ProcessNewConfig("Added", PointDictionary[NextKey].PointId, FullName);
+				}
 				NextKey++;
 			}
 			return s;
