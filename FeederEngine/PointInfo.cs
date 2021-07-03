@@ -2,7 +2,7 @@
 using ClearScada.Client.Advanced;
 
 // Class of 'watched' point or accumulator objects
-namespace DataFeeder
+namespace FeederEngine
 {
 	public class PointInfo
 	{

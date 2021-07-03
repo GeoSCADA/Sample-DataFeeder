@@ -2,13 +2,10 @@
 using System.Threading.Tasks;
 using ClearScada.Client; // Find ClearSCADA.Client.dll in the Program Files\Schneider Electric\ClearSCADA folder
 using ClearScada.Client.Advanced;
-using System.IO;
-using DataFeeder;
 using Newtonsoft.Json; // Bring in with nuget
-using Azure.Messaging.EventHubs;
 using Azure.Messaging.EventHubs.Producer;
 using System.Collections.Concurrent;
-
+using FeederEngine;
 
 // Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
 // This app writes output data in JSON format to Azure Event Hub.
@@ -34,7 +31,7 @@ namespace DataFeederApp
 		// Setting this shorter will impact performance. Do not use less than 30 seconds, that is not sensible.
 		// If you have a mix of historic and non-historic points then consider modifying the library to read
 		// from each at different intervals.
-		private static int UpdateIntervalSec = 5;
+		private static int UpdateIntervalSec = 300;
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
 
@@ -83,7 +80,7 @@ namespace DataFeederApp
 			Console.WriteLine("Logged on.");
 
 			// Set up connection, read rate and the callback function/action for data processing
-			if (!FeederEngine.Connect(AdvConnection, true, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
+			if (!Feeder.Connect(AdvConnection, true, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
 				Console.WriteLine("Not connected");
 				return;
@@ -100,7 +97,7 @@ namespace DataFeederApp
 			// For a single point test, use this.
 			//FeederEngine.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);
 
-			Console.WriteLine("Points Watched: " + FeederEngine.SubscriptionCount().ToString());
+			Console.WriteLine("Points Watched: " + Feeder.SubscriptionCount().ToString());
 			Continue = true; // Set to false by a shutdown event/callback
 							 // Stats during the data feed:
 			long UpdateCount = 0;
@@ -108,24 +105,23 @@ namespace DataFeederApp
 			double ProcTime = 0;
 			int LastQueue = 0;
 			int HighWaterQueue = 0;
-			int BatchCount = 0;
 			do
 			{
 				// Check time and cause processing/export
 				DateTimeOffset ProcessStartTime = DateTimeOffset.UtcNow;
 
-				UpdateCount += FeederEngine.ProcessUpdates(); // Keep calling to pull data out. It returns after one second of process time. Adjust as needed.
+				UpdateCount += Feeder.ProcessUpdates(); // Keep calling to pull data out. It returns after one second of process time. Adjust as needed.
 
 				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
 
 				// Output stats
-				Console.WriteLine($"Total Updates: {UpdateCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {FeederEngine.ProcessQueueCount()}");
+				Console.WriteLine($"Total Updates: {UpdateCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}");
 
 				await Task.Delay(1000); // You must pause to allow the database to serve other tasks. 
 										// Consider the impact on the server, particularly if it is Main or Standby. A dedicated Permanent Standby could be used for this export.
 
 				// Check if we are falling behind - and recommend longer scan interval
-				int PC = FeederEngine.ProcessQueueCount();
+				int PC = Feeder.ProcessQueueCount();
 				if (PC > LastQueue)
 				{
 					// Gone up - more than last time?
@@ -212,13 +208,13 @@ namespace DataFeederApp
 			{
 				// For your application, consider reading and using the LastChange parameter from your persistent store.
 				// This will ensure gap-free historic data.
-				if (!FeederEngine.AddSubscription(point.FullName, DateTimeOffset.MinValue))
+				if (!Feeder.AddSubscription(point.FullName, DateTimeOffset.MinValue))
 				{
 					Console.WriteLine("Error adding point. " + point.FullName);
 				}
 				else
 				{
-					int SubCount = FeederEngine.SubscriptionCount();
+					int SubCount = Feeder.SubscriptionCount();
 					if (SubCount % 5000 == 0)
 					{
 						Console.WriteLine("Points Watched: " + SubCount.ToString());

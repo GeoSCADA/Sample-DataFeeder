@@ -42,6 +42,9 @@
     <Reference Include="ClearScada.Client">
       <HintPath>..\..\..\..\..\..\Program Files\Schneider Electric\ClearSCADA\ClearScada.Client.dll</HintPath>
     </Reference>
+    <Reference Include="FeederEngine">
+      <HintPath>..\FeederEngine\bin\Debug\FeederEngine.dll</HintPath>
+    </Reference>
     <Reference Include="Microsoft.Azure.Amqp, Version=2.4.0.0, Culture=neutral, PublicKeyToken=31bf3856ad364e35, processorArchitecture=MSIL">
       <HintPath>..\packages\Microsoft.Azure.Amqp.2.4.13\lib\net45\Microsoft.Azure.Amqp.dll</HintPath>
     </Reference>
@@ -146,8 +149,6 @@
     <Reference Include="System.Xml" />
   </ItemGroup>
   <ItemGroup>
-    <Compile Include="FeederEngine.cs" />
-    <Compile Include="PointInfo.cs" />
     <Compile Include="Program.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

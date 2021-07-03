@@ -14,9 +14,9 @@ using ClearScada.Client.Advanced;
 /// Four function/action callbacks need to be passed in to handle data change, shutdown and new point
 /// filtering. 
 /// </summary>
-namespace DataFeeder
+namespace FeederEngine
 {
-	static class FeederEngine
+	public static class Feeder
 	{
 		static IServer AdvConnection;
 
