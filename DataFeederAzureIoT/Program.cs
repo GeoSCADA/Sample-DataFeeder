@@ -32,6 +32,7 @@ namespace DataFeederApp
 		// If you have a mix of historic and non-historic points then consider modifying the library to read
 		// from each at different intervals.
 		private static int UpdateIntervalSec = 300;
+
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
 
@@ -72,11 +73,11 @@ namespace DataFeederApp
 
 			// Good practice means storing credentials with reversible encryption, not adding them to code as here.
 			var spassword = new System.Security.SecureString();
-			foreach (var c in "SnoopySnoopy")
+			foreach (var c in "MyExportPassword")
 			{
 				spassword.AppendChar(c);
 			}
-			AdvConnection.LogOn("Serck", spassword);
+			AdvConnection.LogOn("MyExportUser", spassword);
 			Console.WriteLine("Logged on.");
 
 			// Set up connection, read rate and the callback function/action for data processing
@@ -95,7 +96,7 @@ namespace DataFeederApp
 			var MyGroup = AdvConnection.FindObject("SA"); // This group id could be used to monitor a subgroup of points
 			await AddAllPointsInGroup(MyGroup.Id, AdvConnection);
 			// For a single point test, use this.
-			//FeederEngine.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);
+			//Feeder.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);
 
 			Console.WriteLine("Points Watched: " + Feeder.SubscriptionCount().ToString());
 			Continue = true; // Set to false by a shutdown event/callback
@@ -245,7 +246,7 @@ namespace DataFeederApp
 
 		public static void ExportString_WriteLine(string Out)
 		{
-			// Create a new file after <4K (e.g. billed message size of Azure)
+			// Create a new file after <80K (e.g. billed message size of Azure)
 			if (ExportString.Length > 80000)
 			{
 				CloseOpenExportString();
