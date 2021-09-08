@@ -1,7 +1,9 @@
 ﻿using System;
 using System.Threading.Tasks;
+using System.Collections.Generic;
 using ClearScada.Client; // Find ClearSCADA.Client.dll in the Program Files\Schneider Electric\ClearSCADA folder
 using ClearScada.Client.Advanced;
+using System.IO;
 using Newtonsoft.Json; // Bring in with nuget
 using Azure.Messaging.EventHubs.Producer;
 using System.Collections.Concurrent;
@@ -13,25 +15,29 @@ using FeederEngine;
 
 // Azure Event Hubs: https://docs.microsoft.com/en-us/samples/azure/azure-sdk-for-net/azuremessagingeventhubs-samples/
 
+// Note that if Geo SCADA server state changes (e.g. Main to Fail or Standby to Main) then this program will stop.
+// You can add more advanced behaviours as you wish, for example creating this as a service.
 namespace DataFeederApp
 {
 
 	class Program
 	{
-		// Current Update Rate. Please read carefully:
-		// ===========================================
-		// This is the change detection interval for points.
-		// You are not recommended to speed this up much, as performance is impacted if this time is short. 
+		// Current Update Rates. Please read carefully:
+		// ============================================
+		// These are the change detection intervals for points. 
+		// Two separate intervals for Historic and Non-Historic points can be set.
+		// You are not recommended to speed these up much, as performance is impacted if this time is short. 
+		// Historic interval: UpdateIntervalHisSec
 		// If you are feeding mostly points with historic data, then the PointInfo class will fill in the gaps
-		// with data queries and you can increase this detection interval for better performance. 
+		// with data queries and you can increase the historic detection interval (longer) for better performance. 
 		// If you can wait up to 5 minutes or more to receive data, then you should. Set this to 300, or longer.
-		// If you are feeding points with current data (i.e. their History is not enabled), then this interval
+		// Current data interval: UpdateIntervalCurSec
+		// If you are feeding points with current data (i.e. their History is not enabled), then that interval
 		// is the minimum time interval that changes will be detected. If you are scanning data sources every
 		// 30 seconds with NO history and you want every update, then set this interval to match. 
 		// Setting this shorter will impact performance. Do not use less than 30 seconds, that is not sensible.
-		// If you have a mix of historic and non-historic points then consider modifying the library to read
-		// from each at different intervals.
-		private static int UpdateIntervalSec = 300;
+		private static int UpdateIntervalHisSec = 300;
+		private static int UpdateIntervalCurSec = 60;
 
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
@@ -40,15 +46,20 @@ namespace DataFeederApp
 		public static long UpdateCount = 0;
 		public static long BatchCount = 0;
 
+		// Data file location for output of last update times file
+		private static string FileBaseName = @"Feeder\Data.txt";
+		// last update times list
+		private static Dictionary<int, DateTimeOffset> UpdateTimeList;
+
 		// Global node and Geo SCADA server connection -- using ClearScada.Client.Advanced;
 		private static ServerNode node;
 		private static IServer AdvConnection;
 
 		// connection string to the Event Hubs namespace - replace this with your key
-		private const string connectionString = "Endpoint=sb://mygscada.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=hUiuhIuhUIhNHOFiTYrVrTyirTRYirRtiyTr=";
+		private const string connectionString = "Endpoint=sb://geoscada.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=wX/U1ODDN3vrDTmT33CCifsBSMWLlXYGixX0JI2Aohg=";
 
 		// name of the event hub - replace this with your hub name
-		private const string eventHubName = "geoscadaeh";
+		private const string eventHubName = "telemetry";
 
 		private static ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
 
@@ -69,19 +80,34 @@ namespace DataFeederApp
 
 			// Geo SCADA Connection
 			node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
-			AdvConnection = node.Connect("Utility", false);
-
+			try
+			{
+				AdvConnection = node.Connect("Utility", false);
+			}
+			catch
+			{
+				Console.WriteLine("Cannot connect to Geo SCADA");
+				return;
+			}
 			// Good practice means storing credentials with reversible encryption, not adding them to code as here.
 			var spassword = new System.Security.SecureString();
-			foreach (var c in "MyExportPassword")
+			foreach (var c in "SnoopySnoopy")
 			{
 				spassword.AppendChar(c);
 			}
-			AdvConnection.LogOn("MyExportUser", spassword);
+			try
+			{
+				AdvConnection.LogOn("Serck", spassword);
+			}
+			catch
+			{
+				Console.WriteLine("Cannot log on to Geo SCADA");
+				return;
+			}
 			Console.WriteLine("Logged on.");
-
+			
 			// Set up connection, read rate and the callback function/action for data processing
-			if (!Feeder.Connect(AdvConnection, true, UpdateIntervalSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
+			if (!Feeder.Connect(AdvConnection, true, true, UpdateIntervalHisSec, UpdateIntervalCurSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
 				Console.WriteLine("Not connected");
 				return;
@@ -91,8 +117,12 @@ namespace DataFeederApp
 			// For writing data
 			CreateExportString();
 
+			// Read file of last update times
+			UpdateTimeList = ReadUpdateTimeList( FileBaseName);
+
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
+			// Use "$Root" for all points in the system, or customise to a specific group
 			var MyGroup = AdvConnection.FindObject("SA"); // This group id could be used to monitor a subgroup of points
 			await AddAllPointsInGroup(MyGroup.Id, AdvConnection);
 			// For a single point test, use this.
@@ -103,6 +133,7 @@ namespace DataFeederApp
 							 // Stats during the data feed:
 			long UpdateCount = 0;
 			DateTimeOffset StartTime = DateTimeOffset.UtcNow;
+			DateTimeOffset FlushUpdateFileTime = DateTimeOffset.UtcNow;
 			double ProcTime = 0;
 			int LastQueue = 0;
 			int HighWaterQueue = 0;
@@ -116,7 +147,19 @@ namespace DataFeederApp
 				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
 
 				// Output stats
-				Console.WriteLine($"Total Updates: {UpdateCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}");
+				Console.WriteLine($"Total Updates: {UpdateCount} Pubs: {BatchCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}, Out Q: {OutputQueue.Count}");
+
+				// Flush UpdateTimeList file every minute
+				if (FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow)
+				{
+					Console.WriteLine("Flush UpdateTime File - start");
+					WriteUpdateTimeList(FileBaseName, UpdateTimeList);
+					FlushUpdateFileTime = DateTimeOffset.UtcNow;
+					Console.WriteLine("Flush UpdateTime File - end");
+
+					// Also flush data regularly
+					CloseOpenExportString();
+				}
 
 				await Task.Delay(1000); // You must pause to allow the database to serve other tasks. 
 										// Consider the impact on the server, particularly if it is Main or Standby. A dedicated Permanent Standby could be used for this export.
@@ -137,6 +180,8 @@ namespace DataFeederApp
 				await SendToAzureEventHub();
 
 			} while (Continue);
+			// Finish by writing time list
+			WriteUpdateTimeList(FileBaseName, UpdateTimeList);
 
 			// Flush remaining data.
 			CloseOpenExportString();
@@ -176,7 +221,7 @@ namespace DataFeederApp
 		}
 
 		/// <summary>
-		/// List recursively all point objects in all sub-groups
+		/// List recursively all point objects in all groups
 		/// Declared with async to include a delay letting other database tasks work
 		/// </summary>
 		/// <param name="group"></param>
@@ -207,9 +252,15 @@ namespace DataFeederApp
 		{
 			foreach (var point in objects)
 			{
-				// For your application, consider reading and using the LastChange parameter from your persistent store.
+				// Reading and use the LastChange parameter from our persistent store.
 				// This will ensure gap-free historic data.
-				if (!Feeder.AddSubscription(point.FullName, DateTimeOffset.MinValue))
+				DateTimeOffset StartTime = DateTimeOffset.MinValue;
+				if (UpdateTimeList.ContainsKey(point.Id))
+				{
+					StartTime = UpdateTimeList[point.Id];
+					Console.WriteLine("Add '" + point.FullName + "' from: " + StartTime.ToString() );
+				}
+				if (!Feeder.AddSubscription(point.FullName, StartTime))
 				{
 					Console.WriteLine("Error adding point. " + point.FullName);
 				}
@@ -224,24 +275,87 @@ namespace DataFeederApp
 			}
 		}
 
+		/// <summary>
+		/// Function to return a dictionary of last-updated times per object Id
+		/// </summary>
+		/// <param name="FileBase">A filename - only the folder part is used to create our point/time tracking file</param>
+		/// <returns></returns>
+		static Dictionary<int, DateTimeOffset> ReadUpdateTimeList(string FileBase)
+		{
+			Dictionary<int, DateTimeOffset> UpdateTimeList = new Dictionary<int, DateTimeOffset>();
+
+			Directory.CreateDirectory(Path.GetDirectoryName(FileBase));
+			if (File.Exists(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList.csv"))
+			{
+				StreamReader UpdateTimeListFile = new StreamReader(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList.csv");
+				string line;
+				while ((line = UpdateTimeListFile.ReadLine()) != null)
+				{
+					string[] fields = line.Split(',');
+					int id;
+					DateTimeOffset date;
+					if (fields.Length == 2 && int.TryParse(fields[0], out id) && DateTimeOffset.TryParse(fields[1], out date))
+					{
+						UpdateTimeList.Add(id, date);
+					}
+				}
+				UpdateTimeListFile.Close();
+			}
+			return UpdateTimeList;
+		}
+
+		/// <summary>
+		/// Write the CSV list of point names and update times
+		/// </summary>
+		/// <param name="FileBase">A filename - only the folder part is used to create our point/time tracking file</param>
+		/// <param name="UpdateTimeList">Dictionary of points and their times</param>
+		static void WriteUpdateTimeList(string FileBase, Dictionary<int, DateTimeOffset> UpdateTimeList)
+		{
+			// First write to a temporary file
+			StreamWriter UpdateTimeListFile = new StreamWriter(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList new.csv");
+			foreach( KeyValuePair<int, DateTimeOffset> entry in UpdateTimeList)
+			{
+				UpdateTimeListFile.WriteLine(entry.Key.ToString() + "," + entry.Value.ToString());
+			}
+			UpdateTimeListFile.Close();
+			// Then switch files
+			if (File.Exists(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList.csv"))
+			{
+				File.Replace(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList new.csv",
+								Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList.csv",
+								Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList old.csv");
+			}
+			else
+			{
+				File.Move(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList new.csv",
+								Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList.csv");
+			}
+		}
+
 		// For Azure EventHub we have a simple string, appended for new data and 
 		static string ExportString = "";
 		static int StringCount = 0;
+		static int ExportStringInitialLength = 0;
 		public static void CreateExportString()
 		{
 			StringCount++;
 			ExportString = "{\"dataTime\":\"" + DateTimeOffset.UtcNow.ToString() + "." + DateTimeOffset.UtcNow.ToString("fff") + "\",\"data\":["; // Wrap individual items as an array
+			ExportStringInitialLength = ExportString.Length;
 		}
 
 		public static void CloseOpenExportString()
 		{
-			ExportString += "]}";
+			// If data exists to export
+			if (ExportString.Length > ExportStringInitialLength)
+			{
+				ExportString += "]}";
 
-			Console.WriteLine(ExportString.Substring(0, 80) + "...");
-			OutputQueue.Enqueue(ExportString);
+				// Console.WriteLine(ExportString.Substring(0, 120) + "...");
+				OutputQueue.Enqueue(ExportString);
 
-			// Start gathering next
-			CreateExportString();
+				// Start gathering next
+				CreateExportString();
+			}
 		}
 
 		public static void ExportString_WriteLine(string Out)
@@ -252,7 +366,7 @@ namespace DataFeederApp
 				CloseOpenExportString();
 			}
 			// Don't write a comma in the first entry
-			if (ExportString.Length > 55)
+			if (ExportString.Length > ExportStringInitialLength)
 			{
 				ExportString += ",";
 			}
@@ -268,13 +382,14 @@ namespace DataFeederApp
 		/// <param name="Value"></param>
 		/// <param name="Timestamp"></param>
 		/// <param name="Quality"></param>
-		public static void ProcessNewData(string UpdateType, int Id, string PointName, double Value, DateTimeOffset Timestamp, int Quality)
+		public static void ProcessNewData(string UpdateType, int Id, string PointName, double Value, DateTimeOffset Timestamp, long Quality)
 		{
 			// If the data retrieval fails, call for shutdown
 			// Consider making UpdateType an enumeration
 			if (UpdateType == "Shutdown")
 			{
 				EngineShutdown();
+				return;
 			}
 			var DataUpdate = new DataVQT
 			{
@@ -291,8 +406,17 @@ namespace DataFeederApp
 
 			ExportString_WriteLine(json);
 
+			// Update id and Date in the list
+			if (UpdateTimeList.ContainsKey( Id) )
+			{
+				UpdateTimeList[ Id ] = Timestamp;
+			}
+			else
+			{
+				UpdateTimeList.Add(Id, Timestamp);
+			}
 		}
-
+		
 		/// <summary>
 		/// Write out received configuration data
 		/// </summary>
@@ -303,18 +427,36 @@ namespace DataFeederApp
 		{
 			// Could add further code to get point configuration fields and types to export, 
 			// e.g. GPS locations, analogue range, digital states etc.
-			// Note that this would increase start time and database load during start.
-			var ConfigUpdate = new ConfigChange
+			// Note that this would increase start time and database load during start, 
+			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set.
+			// Get Point properties, these will depend on type
+			object[] PointProperties = { "", 0, 0, "", 0, 0, 0};
+			try
 			{
-				PointId = Id,
-				UpdateType = UpdateType,
-				PointName = PointName,
-				Timestamp = DateTimeOffset.UtcNow
-			};
-			string json = JsonConvert.SerializeObject(ConfigUpdate);
-			ExportString_WriteLine(json);
+				PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
+				var ConfigUpdate = new ConfigChange
+				{
+					PointId = Id,
+					UpdateType = UpdateType,
+					PointName = PointName,
+					Timestamp = DateTimeOffset.UtcNow,
+					ClassName = (string)PointProperties[0],
+					FullScale = (double)(PointProperties[1] ?? (double)0),
+					ZeroScale = (double)(PointProperties[2] ?? (double)0),
+					Units = (string)(PointProperties[3] ?? ""),
+					BitCount = (byte)(PointProperties[4] ?? (byte)0),
+					Latitude = (double)(PointProperties[5] ?? (double)0),
+					Longitude = (double)(PointProperties[6] ?? (double)0)
+				};
+				string json = JsonConvert.SerializeObject(ConfigUpdate);
+				ExportString_WriteLine(json);
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine("Error reading properties for configuration: " + e.Message);
+			}
 		}
-
+		
 		/// <summary>
 		/// Called when server state changes from Main or Standby, this stops all monitoring
 		/// </summary>
@@ -323,14 +465,14 @@ namespace DataFeederApp
 			Console.WriteLine("Engine Shutdown");
 			Continue = false;
 		}
-
+		
 		/// <summary>
 		/// Callback used to filter new points being added to configuration
 		/// In this case we say yes to all newly configured points
 		/// </summary>
 		/// <param name="FullName">Of the point (or accumulator)</param>
 		/// <returns>True to start watching this point</returns>
-		public static bool FilterNewPoint(string FullName)
+		public static bool FilterNewPoint( string FullName)
 		{
 			return true;
 		}
@@ -355,5 +497,12 @@ namespace DataFeederApp
 		public string UpdateType;
 		public string PointName;
 		public DateTimeOffset Timestamp;
+		public string ClassName;
+		public Double FullScale;
+		public Double ZeroScale;
+		public string Units;
+		public int BitCount;
+		public Double Latitude;
+		public Double Longitude;
 	}
 }

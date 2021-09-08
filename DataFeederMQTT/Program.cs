@@ -6,12 +6,15 @@ using ClearScada.Client.Advanced;
 using System.IO;
 using Newtonsoft.Json; // Bring in with nuget
 using FeederEngine;
+using System.Collections.Concurrent;
+using uPLibrary.Networking.M2Mqtt; // Bring in with nuget
 
-// Test and demo app for the FeederEngine and PointInfo classes
-// This app writes output data in JSON format in files with a defined max size.
+// Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
+// This app writes output data in JSON format to an MQTT server
 // It can easily be modified to change the format or output destination.
 
 // Note that if Geo SCADA server state changes (e.g. Main to Fail or Standby to Main) then this program will stop.
+// If the MQTT connection fails then the program also stops.
 // You can add more advanced behaviours as you wish, for example creating this as a service.
 namespace DataFeederApp
 {
@@ -38,10 +41,12 @@ namespace DataFeederApp
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
 
+		// Performance counts
+		public static long UpdateCount = 0;
+		public static long BatchCount = 0;
+
 		// Test data file for output of historic, current or configuration data
 		private static string FileBaseName = @"Feeder\ExportData.txt";
-
-		private static StreamWriter ExportStream;
 
 		// last update times list
 		private static Dictionary<int, DateTimeOffset> UpdateTimeList;
@@ -50,6 +55,18 @@ namespace DataFeederApp
 		private static ServerNode node;
 		private static IServer AdvConnection;
 
+		// The Mqtt Library object
+		private static MqttClient Client;
+
+		// Connection parameters
+		private static string MQTTServerName = "192.168.86.123";
+		private static int MQTTServerPort = 1883;
+		private static string MQTTClientName = "Geo SCADA Data Feeder 1";
+		private static string MQTTTopicName = "Geo SCADA";
+
+		// In-memory queue of messages to be sent out
+		private static ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
+
 		/// <summary>
 		/// Demo program showing simple data subscription and feed
 		/// </summary>
@@ -57,6 +74,24 @@ namespace DataFeederApp
 		/// <returns></returns>
 		async static Task Main(string[] args)
 		{
+			// MQTT Connection
+			// This uses no security, you are recommended to implement connection security
+			try
+			{
+				Client = new MqttClient(MQTTServerName, MQTTServerPort, false, MqttSslProtocols.None, null, null);
+				Client.ProtocolVersion = MqttProtocolVersion.Version_3_1_1;
+				// Events
+				Client.ConnectionClosed += Client_MqttConnectionClosed;
+				// Connect
+				Client.Connect(MQTTClientName, "", "", true, 3600);
+				// No username and password above, you can use Client.Connect(MQTTClientName, username, password ...);
+			}
+			catch
+			{
+				Console.WriteLine("Cannot connect to MQTT");
+				return;
+			}
+
 			// Geo SCADA Connection
 			node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
 			try
@@ -94,7 +129,7 @@ namespace DataFeederApp
 			Console.WriteLine("Connect to Feeder Engine.");
 
 			// For writing data
-			CreateExportFileStream();
+			CreateExportString();
 
 			// Read file of last update times
 			UpdateTimeList = ReadUpdateTimeList( FileBaseName);
@@ -126,7 +161,7 @@ namespace DataFeederApp
 				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
 
 				// Output stats
-				Console.WriteLine($"Total Updates: {UpdateCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}");
+				Console.WriteLine($"Total Updates: {UpdateCount} Pubs: {BatchCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}, Out Q: {OutputQueue.Count}");
 
 				// Flush UpdateTimeList file every minute
 				if (FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow)
@@ -135,6 +170,9 @@ namespace DataFeederApp
 					WriteUpdateTimeList(FileBaseName, UpdateTimeList);
 					FlushUpdateFileTime = DateTimeOffset.UtcNow;
 					Console.WriteLine("Flush UpdateTime File - end");
+
+					// Also flush data regularly
+					CloseOpenExportString();
 				}
 
 				await Task.Delay(1000); // You must pause to allow the database to serve other tasks. 
@@ -153,14 +191,45 @@ namespace DataFeederApp
 				}
 				LastQueue = PC;
 
+				SendToMQTTServer();
+
 			} while (Continue);
 
 			// Finish by writing time list
 			WriteUpdateTimeList(FileBaseName, UpdateTimeList);
+			// Flush remaining data.
+			CloseOpenExportString();
+			SendToMQTTServer();
+			// Close MQTT Connection
+			Client.Disconnect();
+		}
+
+		private static void SendToMQTTServer()
+		{
+			// Dequeue to MQTT
+			while (OutputQueue.Count > 0)
+			{
+				if (OutputQueue.TryDequeue(out String update))
+				{
+					try
+					{
+						// Using QoS level 1 - receive at least once
+						Client.Publish(MQTTTopicName, System.Text.Encoding.UTF8.GetBytes(update), 1, false);
+						BatchCount++;
+						//if (BatchCount % 100 == 0)
+						//	Console.WriteLine("Published: " + BatchCount.ToString() + " " + update.Substring(0,90) + "...");
+					}
+					catch (Exception e)
+					{
+						Console.WriteLine("*** Error sending message: " + e.Message);
+						// Some handling here should persist the dequeued and queued data and retry
+					}
+				}
+			}
 		}
 
 		/// <summary>
-		/// List recursively all point objects in all sub-groups
+		/// List recursively all point objects in all groups
 		/// Declared with async to include a delay letting other database tasks work
 		/// </summary>
 		/// <param name="group"></param>
@@ -271,41 +340,53 @@ namespace DataFeederApp
 			}
 		}
 
-
-		public static void CreateExportFileStream()
+		private static void Client_MqttConnectionClosed(object sender, System.EventArgs e)
 		{
-			// Make a filename from the base by adding date/time text
-			DateTimeOffset Now = DateTimeOffset.UtcNow;
-			Directory.CreateDirectory( Path.GetDirectoryName(FileBaseName));
-			string DatedFileName = Path.GetDirectoryName(FileBaseName) + "\\" + Path.GetFileNameWithoutExtension(FileBaseName) + Now.ToString("-yyyy-MM-dd-HH-mm-ss-fff") + Path.GetExtension(FileBaseName);
-			ExportStream = new StreamWriter(DatedFileName);
-			ExportStream.WriteLine("{\"dataTime\":\"" + DateTimeOffset.UtcNow.ToString() + "." + DateTimeOffset.UtcNow.ToString("fff") + "\",\"data\":["); // Wrap individual items as an array
-			ExportStreamBytesWritten = 55; // Approx
+			Console.WriteLine("Callback to MqttConnectionClosed");
+			// Stop the export - could add handling of this with buffering and re-attempts to connect
+			Continue = false;
 		}
 
-		public static void CloseOpenExportFileStream()
+		// For MQTT we have a simple string, appended for new data 
+
+		static string ExportString = "";
+		static int StringCount = 0;
+		static int ExportStringInitialLength = 0;
+		public static void CreateExportString()
 		{
-			ExportStream.WriteLine("]}");
-			ExportStream.Close();
-			CreateExportFileStream();
+			StringCount++;
+			ExportString = "{\"dataTime\":\"" + DateTimeOffset.UtcNow.ToString() + "." + DateTimeOffset.UtcNow.ToString("fff") + "\",\"data\":["; // Wrap individual items as an array
+			ExportStringInitialLength = ExportString.Length;
 		}
 
-		static int ExportStreamBytesWritten = 0;
-
-		public static void ExportStream_WriteLine(string Out)
+		public static void CloseOpenExportString()
 		{
-			// Create a new file after <50K 
-			if (ExportStreamBytesWritten > 50000)
+			// If data exists to export
+			if (ExportString.Length > ExportStringInitialLength)
 			{
-				CloseOpenExportFileStream();
+				ExportString += "]}";
+
+				// Console.WriteLine(ExportString.Substring(0, 120) + "...");
+				OutputQueue.Enqueue(ExportString);
+
+				// Start gathering next
+				CreateExportString();
+			}
+		}
+
+		public static void ExportString_WriteLine(string Out)
+		{
+			// Create a new file after <80K (e.g. set by behaviour of target MQTT subscriber)
+			if (ExportString.Length > 80000)
+			{
+				CloseOpenExportString();
 			}
 			// Don't write a comma in the first entry
-			if (ExportStreamBytesWritten > 55)
+			if (ExportString.Length > ExportStringInitialLength)
 			{
-				ExportStream.Write(",");
+				ExportString += ",";
 			}
-			ExportStreamBytesWritten += Out.Length + 3;
-			ExportStream.WriteLine(Out);
+			ExportString += Out;
 		}
 
 		/// <summary>
@@ -338,8 +419,8 @@ namespace DataFeederApp
 				ExtendedQuality = ((int)(Quality) / 256)
 			};
 			string json = JsonConvert.SerializeObject(DataUpdate);
-			
-			ExportStream_WriteLine(json);
+
+			ExportString_WriteLine(json);
 
 			// Update id and Date in the list
 			if (UpdateTimeList.ContainsKey( Id) )
@@ -384,7 +465,7 @@ namespace DataFeederApp
 					Longitude = (double)(PointProperties[6] ?? (double)0)
 				};
 				string json = JsonConvert.SerializeObject(ConfigUpdate);
-				ExportStream_WriteLine(json);
+				ExportString_WriteLine(json);
 			}
 			catch (Exception e)
 			{

@@ -7,11 +7,12 @@ namespace FeederEngine
 	public class PointInfo
 	{
 		private int TagId { get; set; }
-		private string PointName { get; set; }
-		private bool IsAccumulator { get; set; }
-		private bool IsHistoric { get; set; }
+		public string PointName { get; set; }
+		public bool IsAccumulator { get; set; }
+		public bool IsHistoric { get; set; } // Make some members public so engine can perform first read
 		private string HistoricAggregateName { get; set; }
-		private int ReadSeconds { get; set; }
+		private int ReadSecondsHis { get; set; }
+		private int ReadSecondsCur { get; set; }
 
 		public DateTimeOffset LastChange;
 		public int PointId;
@@ -19,22 +20,23 @@ namespace FeederEngine
 		// Single connection
 		static IServer AdvConnection;
 		static bool ServerConnect = false;
-		Action<string, int, string, double, DateTimeOffset, int> ProcessNewData;
+		Action<string, int, string, double, DateTimeOffset, long> ProcessNewData;
 
 		// Constructor
-		public PointInfo(int _TagId, string _PointName, int _ReadSeconds, DateTimeOffset _LastChange, IServer _AdvConnection, Action<string, int, string, double, DateTimeOffset, int> _ProcessNewData)
+		public PointInfo(int _TagId, string _PointName, int _ReadSecondsHis, int _ReadSecondsCur, DateTimeOffset _LastChange, IServer _AdvConnection, Action<string, int, string, double, DateTimeOffset, long> _ProcessNewData)
 		{
 			IsAccumulator = false;
 			IsHistoric = false;
 			TagId = _TagId;
-			ReadSeconds = _ReadSeconds;
+			ReadSecondsHis = _ReadSecondsHis;
+			ReadSecondsCur = _ReadSecondsCur;
 			PointName = _PointName;
 
 			// If the LastChange DateTime is not specified or future, use the current time less read interval.
 			// Typically LastChangeSeconds is used first time export runs, then the calling app saves LastChange periodically.
 			if (_LastChange == DateTimeOffset.MinValue || _LastChange > DateTimeOffset.UtcNow) 
 			{
-				LastChange = DateTime.Now.AddSeconds(-_ReadSeconds);  // Default time to wind back on start lastchange
+				LastChange = DateTime.Now.AddSeconds(-_ReadSecondsHis);  // Default time to wind back on start lastchange
 			}
 			else
 			{
@@ -95,17 +97,18 @@ namespace FeederEngine
 				if (IsHistoric)
 				{
 					AdvConnection.AddTags(new TagDetails(TagId, PointName + "." + HistoricAggregateName + ".LastUpdateTime",
-																					new TimeSpan(0, 0, ReadSeconds)));
+																					new TimeSpan(0, 0, ReadSecondsHis)));
 				}
 				else
 				{
 					if (IsAccumulator)
 					{
-						AdvConnection.AddTags(new TagDetails(TagId, PointName + ".CurrentTotal", new TimeSpan(0, 0, ReadSeconds)));
+						// Accumulator with no history
+						AdvConnection.AddTags(new TagDetails(TagId, PointName + ".CurrentTotal", new TimeSpan(0, 0, ReadSecondsCur)));
 					}
 					else
 					{
-						AdvConnection.AddTags(new TagDetails(TagId, PointName + ".CurrentValue", new TimeSpan(0, 0, ReadSeconds)));
+						AdvConnection.AddTags(new TagDetails(TagId, PointName + ".CurrentValue", new TimeSpan(0, 0, ReadSecondsCur)));
 					}
 				}
 			}
@@ -123,8 +126,38 @@ namespace FeederEngine
 		}
 
 		// Read historic or real-time data
-		public int ReadHistoric(IServer AdvConnection, TagUpdate Update)
+		public int ReadHistoric(IServer AdvConnection, CustomTagUpdate Update)
 		{
+			// If this is an initialisation update, only applicable to the first read of a value
+			if (Update.Status == "Init")
+			{
+				if (IsHistoric) // UpdateValue is the historic update time
+				{
+					Update.Value = DateTimeOffset.UtcNow;
+				}
+				else // Read current data value
+				{
+					object[] PointProperties = {  };
+					try
+					{
+						if (IsAccumulator)
+						{
+							PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "CurrentTotalTime", "CurrentTotal", "CurrentTotalQuality" });
+						}
+						else
+						{
+							PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "CurrentTime", "CurrentValue", "CurrentQuality" });
+						}
+						Update.Timestamp = (DateTimeOffset)PointProperties[0];
+						Update.Value = (object)PointProperties[1];
+						Update.Quality =  (ushort)PointProperties[2];
+					}
+					catch (Exception e)
+					{
+						Console.WriteLine("Error reading init data value: " + e.Message);
+					}
+				}
+			}
 			int UpdateCount = 0;
 			if (IsHistoric) // UpdateValue is the historic update time
 			{
@@ -148,7 +181,7 @@ namespace FeederEngine
 							foreach (var s in hi.Samples)
 							{
 								LastChange = s.Timestamp; // Write time of sample last sent
-								WriteData("His", PointId, PointName, s.Value, s.Timestamp, s.Quality);
+								WriteData("His", PointId, PointName, s.Value, s.Timestamp, (long)s.Quality);
 								historicItemCount++;
 							}
 						}
@@ -163,8 +196,8 @@ namespace FeederEngine
 				catch (ClearScada.Client.CommunicationsException)
 				{
 					Console.WriteLine("*** Comms exception (ReadRawHistory)");
-					// Stop feeding data, lost server connection
-					WriteData("Shutdown", PointId, PointName, 0, DateTimeOffset.UtcNow, 0);
+					// Stop feeding data, lost server connection, send an uncertain value
+					WriteData("Shutdown", PointId, PointName, 0, DateTimeOffset.UtcNow, (long)OpcQuality.Uncertain);
 				}
 
 			}
@@ -177,23 +210,23 @@ namespace FeederEngine
 		}
 
 		// Handle data writes
-		private void WriteData( string DataType, int Id, string PointName, object Value, DateTimeOffset Timestamp, OpcQuality Quality)
+		private void WriteData( string DataType, int Id, string PointName, object Value, DateTimeOffset Timestamp, long Quality)
 		{
 			if (Value is DateTimeOffset)
 			{
 				TimeSpan t = ((DateTimeOffset)(Value)).ToUniversalTime() - new DateTime(1970, 1, 1);
 				long millisecondsSinceEpoch = (long)t.TotalSeconds * 1000;
-				ProcessNewData(DataType, Id, PointName, millisecondsSinceEpoch, Timestamp, (int)Quality);
+				ProcessNewData(DataType, Id, PointName, millisecondsSinceEpoch, Timestamp, Quality);
 				return;
 			}
 			if (Value is Byte)
 			{
 				byte b = (byte)(Value);
 				double v = (double)(b);
-				ProcessNewData( DataType, Id, PointName, v, Timestamp, (int)Quality);
+				ProcessNewData( DataType, Id, PointName, v, Timestamp, Quality);
 				return;
 			}
-			ProcessNewData( DataType, Id, PointName, (double)Value, Timestamp, (int)(Quality));
+			ProcessNewData( DataType, Id, PointName, (double)Value, Timestamp, Quality);
 		}
 
 		// Point is renamed

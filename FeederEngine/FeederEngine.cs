@@ -16,6 +16,16 @@ using ClearScada.Client.Advanced;
 /// </summary>
 namespace FeederEngine
 {
+	// Replaces TagUpdate in ClearScada.Client, which is read-only
+	public class CustomTagUpdate
+	{
+		public int Id;
+		public string Status;
+		public object Value;
+		public long Quality;
+		public DateTimeOffset Timestamp;
+	}
+
 	public static class Feeder
 	{
 		static IServer AdvConnection;
@@ -25,15 +35,17 @@ namespace FeederEngine
 		private static int NextKey = 1;
 		private static ServerState CurrentServerState = ServerState.None;
 		// Dict of Updates
-		private static ConcurrentQueue<TagUpdate> UpdateQueue = new ConcurrentQueue<TagUpdate>();
+		private static ConcurrentQueue<CustomTagUpdate> UpdateQueue = new ConcurrentQueue<CustomTagUpdate>();
 		// Dict of Config changes
 		private static ConcurrentQueue<ObjectUpdateEventArgs> ConfigQueue = new ConcurrentQueue<ObjectUpdateEventArgs>();
-	
-		public static int UpdateIntervalSec; // Used for all points added to the engine
+		// Only one of these is used for any point
+		public static int UpdateIntervalHisSec; // Used for all historic points added to the engine
+		public static int UpdateIntervalCurSec; // Used for all non-Historic points added to the engine
 
 		private static bool UpdateConfigurationOnStart;
+		private static bool UpdateDataOnStart;
 
-		private static Action<string, int, string, double, DateTimeOffset, int> ProcessNewData;
+		private static Action<string, int, string, double, DateTimeOffset, long> ProcessNewData;
 		private static Action<string, int, string> ProcessNewConfig;
 		private static Action Shutdown;
 		private static Func<string, bool> FilterNewPoint;
@@ -43,7 +55,9 @@ namespace FeederEngine
 		/// </summary>
 		/// <param name="_AdvConnection">Database connection</param>
 		/// <param name="_UpdateConfigurationOnStart">If true, send a config message for each point added.</param>
-		/// <param name="_UpdateIntervalSec">See strong warnings in sample about setting this too low.</param>
+		/// <param name="_UpdateDataOnStart">If true, send a data message for each point added.</param>
+		/// <param name="_UpdateIntervalHisSec">See strong warnings in sample Program.cs about setting this too low.</param>
+		/// <param name="_UpdateIntervalCurSec">See strong warnings in sample Program.cs about setting this too low.</param>
 		/// <param name="_ProcessNewData">Callback</param>
 		/// <param name="_ProcessNewConfig">Callback</param>
 		/// <param name="_Shutdown">Callback</param>
@@ -51,15 +65,19 @@ namespace FeederEngine
 		/// <returns></returns>
 		public static bool Connect(IServer _AdvConnection,
 									bool _UpdateConfigurationOnStart,
-									int _UpdateIntervalSec,
-									Action<string, int, string, double, DateTimeOffset, int> _ProcessNewData,
+									bool _UpdateDataOnStart,
+									int _UpdateIntervalHisSec,
+									int _UpdateIntervalCurSec,
+									Action<string, int, string, double, DateTimeOffset, long> _ProcessNewData,
 									Action<string, int, string> _ProcessNewConfig,
 									Action _Shutdown,
 									Func<string, bool> _FilterNewPoint)
 		{
 			AdvConnection = _AdvConnection;
-			UpdateIntervalSec = _UpdateIntervalSec;
+			UpdateIntervalHisSec = _UpdateIntervalHisSec;
+			UpdateIntervalCurSec = _UpdateIntervalCurSec;
 			UpdateConfigurationOnStart = _UpdateConfigurationOnStart;
+			UpdateDataOnStart = _UpdateDataOnStart;
 
 			// Check server is valid
 			CurrentServerState = AdvConnection.GetServerState().State;
@@ -83,6 +101,7 @@ namespace FeederEngine
 
 			// Disconnect Callbacks
 			AdvConnection.StateChanged += DBStateChangeEvent;
+			AdvConnection.AdviseStateChange();
 
 			return true;
 		}
@@ -135,15 +154,26 @@ namespace FeederEngine
 		/// </summary>
 		/// <param name="FullName">Object name string - FullName</param>
 		/// <param name="LastChange">If historic object, then data retrieval starts at this time</param>
-		/// <returns></returns>
+		/// <returns>Success or Failure</returns>
 		public static bool AddSubscription( string FullName, DateTimeOffset LastChange)
 		{
-			bool s = PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, FullName, UpdateIntervalSec, LastChange, AdvConnection, ProcessNewData));
+			bool s = PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, LastChange, AdvConnection, ProcessNewData));
 			if (s)
 			{
 				if (UpdateConfigurationOnStart)
 				{
 					ProcessNewConfig("Added", PointDictionary[NextKey].PointId, FullName);
+				}
+				if (UpdateDataOnStart)
+				{
+					// Queue a data update request
+					var Update = new CustomTagUpdate
+					{
+						Id = NextKey,
+						Status = "Init" // Special status confers this is an initialisation/catch-up update
+					};
+					UpdateQueue.Enqueue(Update);
+					//Console.WriteLine("Tag Update: " + Update.Id.ToString() + ", " + Update.Value.ToString());
 				}
 				NextKey++;
 			}
@@ -164,7 +194,7 @@ namespace FeederEngine
 			DateTimeOffset ProcessStartTime = DateTimeOffset.UtcNow;
 			while (UpdateQueue.Count > 0)
 			{
-				if (UpdateQueue.TryDequeue(out TagUpdate update))
+				if (UpdateQueue.TryDequeue(out CustomTagUpdate update))
 				{
 					// Find point
 					if (PointDictionary.TryGetValue(update.Id, out PointInfo info))
@@ -195,7 +225,7 @@ namespace FeederEngine
 						var newpoint = AdvConnection.LookupObject(new ObjectId(objupdate.ObjectId));
 						if (newpoint != null && FilterNewPoint(newpoint.FullName))
 						{
-							PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, newpoint.FullName, UpdateIntervalSec, DateTimeOffset.MinValue, AdvConnection, ProcessNewData));
+							PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, newpoint.FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, DateTimeOffset.MinValue, AdvConnection, ProcessNewData));
 							NextKey++;
 							Console.WriteLine("Added new point: " + newpoint.FullName);
 							ProcessNewConfig("Created", objupdate.ObjectId, newpoint.FullName);
@@ -221,7 +251,7 @@ namespace FeederEngine
 										var modpoint = AdvConnection.LookupObject(new ObjectId(objupdate.ObjectId));
 										if (modpoint != null)
 										{
-											PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, modpoint.FullName, UpdateIntervalSec, modified.LastChange, AdvConnection, ProcessNewData));
+											PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, modpoint.FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, modified.LastChange, AdvConnection, ProcessNewData));
 											NextKey++;
 											Console.WriteLine("Replaced point: " + modpoint.FullName + ", from: " + modified.LastChange.ToString());
 											ProcessNewConfig( "Modified", objupdate.ObjectId, modpoint.FullName);
@@ -266,7 +296,16 @@ namespace FeederEngine
 		{
 			foreach (var Update in EventArg.Updates)
 			{
-				UpdateQueue.Enqueue(Update);
+				// We create a copy, as we need to create our own, and TagUpdate fields are read-only
+				var ThisUpdate = new CustomTagUpdate
+				{
+					Id = Update.Id,
+					Status = Update.Status,
+					Value = Update.Value,
+					Quality = (long)Update.Quality,
+					Timestamp = Update.Timestamp
+				};
+				UpdateQueue.Enqueue(ThisUpdate);
 				//Console.WriteLine("Tag Update: " + Update.Id.ToString() + ", " + Update.Value.ToString());
 			}
 		}
