@@ -41,6 +41,7 @@ namespace FeederEngine
 		// Only one of these is used for any point
 		public static int UpdateIntervalHisSec; // Used for all historic points added to the engine
 		public static int UpdateIntervalCurSec; // Used for all non-Historic points added to the engine
+		public static int MaxDataAgeDays; // Limits historic retrieval on start-up to protect the server
 
 		private static bool UpdateConfigurationOnStart;
 		private static bool UpdateDataOnStart;
@@ -48,7 +49,7 @@ namespace FeederEngine
 		private static Action<string, int, string, double, DateTimeOffset, long> ProcessNewData;
 		private static Action<string, int, string> ProcessNewConfig;
 		private static Action Shutdown;
-		private static Func<string, bool> FilterNewPoint;
+		private static Func<ObjectDetails, bool> FilterNewPoint;
 
 		/// <summary>
 		/// Acts as the initialiser/constructor
@@ -68,16 +69,18 @@ namespace FeederEngine
 									bool _UpdateDataOnStart,
 									int _UpdateIntervalHisSec,
 									int _UpdateIntervalCurSec,
+									int _MaxDataAgeDays,
 									Action<string, int, string, double, DateTimeOffset, long> _ProcessNewData,
 									Action<string, int, string> _ProcessNewConfig,
 									Action _Shutdown,
-									Func<string, bool> _FilterNewPoint)
+									Func<ObjectDetails, bool> _FilterNewPoint)
 		{
 			AdvConnection = _AdvConnection;
 			UpdateIntervalHisSec = _UpdateIntervalHisSec;
 			UpdateIntervalCurSec = _UpdateIntervalCurSec;
 			UpdateConfigurationOnStart = _UpdateConfigurationOnStart;
 			UpdateDataOnStart = _UpdateDataOnStart;
+			MaxDataAgeDays = _MaxDataAgeDays;
 
 			// Check server is valid
 			CurrentServerState = AdvConnection.GetServerState().State;
@@ -157,7 +160,11 @@ namespace FeederEngine
 		/// <returns>Success or Failure</returns>
 		public static bool AddSubscription( string FullName, DateTimeOffset LastChange)
 		{
-			bool s = PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, LastChange, AdvConnection, ProcessNewData));
+			// Protect against long historic queries
+			DateTimeOffset MaxAge = DateTimeOffset.UtcNow.AddDays(-MaxDataAgeDays);
+			DateTimeOffset LastChangeAdjusted = LastChange > MaxAge ? LastChange : MaxAge;
+			// Create the PointInfo and add to our dictionary
+			bool s = PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, LastChangeAdjusted, AdvConnection, ProcessNewData));
 			if (s)
 			{
 				if (UpdateConfigurationOnStart)
@@ -223,7 +230,7 @@ namespace FeederEngine
 					{
 						// This is run for all new points - use filter to include user's desired points, otherwise everything new would be added
 						var newpoint = AdvConnection.LookupObject(new ObjectId(objupdate.ObjectId));
-						if (newpoint != null && FilterNewPoint(newpoint.FullName))
+						if (newpoint != null && FilterNewPoint(newpoint))
 						{
 							PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, newpoint.FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, DateTimeOffset.MinValue, AdvConnection, ProcessNewData));
 							NextKey++;

@@ -38,6 +38,13 @@ namespace DataFeederApp
 		private static int UpdateIntervalHisSec = 300;
 		private static int UpdateIntervalCurSec = 60;
 
+		// This limits the period searched for historic data on start-up.
+		// It's useful to have this to prevent large historic queries.
+		// When the AddSubscription method is called with a Start Time, that time will be adjusted if the time period
+		// (from then to now) is greater than this maximum age. Therefore when this export is restarted after a time
+		// gap of more than this age, then data will be missing from the export.
+		private static int MaxDataAgeDays = 1;
+
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
 
@@ -105,13 +112,13 @@ namespace DataFeederApp
 			}
 			// Good practice means storing credentials with reversible encryption, not adding them to code as here.
 			var spassword = new System.Security.SecureString();
-			foreach (var c in "SnoopySnoopy")
+			foreach (var c in "AdminExample")
 			{
 				spassword.AppendChar(c);
 			}
 			try
 			{
-				AdvConnection.LogOn("Serck", spassword);
+				AdvConnection.LogOn("AdminExample", spassword);
 			}
 			catch
 			{
@@ -121,7 +128,7 @@ namespace DataFeederApp
 			Console.WriteLine("Logged on.");
 			
 			// Set up connection, read rate and the callback function/action for data processing
-			if (!Feeder.Connect(AdvConnection, true, true, UpdateIntervalHisSec, UpdateIntervalCurSec, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
+			if (!Feeder.Connect(AdvConnection, true, true, UpdateIntervalHisSec, UpdateIntervalCurSec, MaxDataAgeDays, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
 				Console.WriteLine("Not connected");
 				return;
@@ -137,7 +144,7 @@ namespace DataFeederApp
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
 			// Use "$Root" for all points in the system, or customise to a specific group
-			var MyGroup = AdvConnection.FindObject("SA"); // This group id could be used to monitor a subgroup of points
+			var MyGroup = AdvConnection.FindObject("$Root"); // This group id could be used to monitor a subgroup of points
 			await AddAllPointsInGroup(MyGroup.Id, AdvConnection);
 			// For a single point test, use this.
 			//Feeder.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);
@@ -149,8 +156,8 @@ namespace DataFeederApp
 			DateTimeOffset StartTime = DateTimeOffset.UtcNow;
 			DateTimeOffset FlushUpdateFileTime = DateTimeOffset.UtcNow;
 			double ProcTime = 0;
+			int LongestQueue = 0;
 			int LastQueue = 0;
-			int HighWaterQueue = 0;
 			do
 			{
 				// Check time and cause processing/export
@@ -161,15 +168,15 @@ namespace DataFeederApp
 				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
 
 				// Output stats
-				Console.WriteLine($"Total Updates: {UpdateCount} Pubs: {BatchCount} Rate: {(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}, Out Q: {OutputQueue.Count}");
+				Console.WriteLine($"Updates: {UpdateCount} Rate: {(int)(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)} /sec Process Time: {ProcTime}mS, Queued: {Feeder.ProcessQueueCount()}, Out Q: {OutputQueue.Count}, Pubs: {BatchCount}");
 
 				// Flush UpdateTimeList file every minute
 				if (FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow)
 				{
-					Console.WriteLine("Flush UpdateTime File - start");
+					Console.Write("Flush UpdateTime File - start...");
 					WriteUpdateTimeList(FileBaseName, UpdateTimeList);
 					FlushUpdateFileTime = DateTimeOffset.UtcNow;
-					Console.WriteLine("Flush UpdateTime File - end");
+					Console.WriteLine("End");
 
 					// Also flush data regularly
 					CloseOpenExportString();
@@ -180,14 +187,14 @@ namespace DataFeederApp
 
 				// Check if we are falling behind - and recommend longer scan interval
 				int PC = Feeder.ProcessQueueCount();
-				if (PC > LastQueue)
+				if (PC > LongestQueue)
 				{
-					// Gone up - more than last time?
-					if (PC > HighWaterQueue && PC > 100 && HighWaterQueue != 0)
+					// Gone up, and previous count wasn't low
+					if (LastQueue > 100)
 					{
-						Console.WriteLine("*** High water mark increasing, queue not being processed quickly, consider increasing update interval.");
-						HighWaterQueue = PC;
+						Console.WriteLine("*** Queue size increasing, queue not being processed quickly, consider increasing update interval.");
 					}
+					LongestQueue = PC;
 				}
 				LastQueue = PC;
 
@@ -229,7 +236,7 @@ namespace DataFeederApp
 		}
 
 		/// <summary>
-		/// List recursively all point objects in all groups
+		/// List recursively all point objects in all sub-groups
 		/// Declared with async to include a delay letting other database tasks work
 		/// </summary>
 		/// <param name="group"></param>
@@ -260,24 +267,28 @@ namespace DataFeederApp
 		{
 			foreach (var point in objects)
 			{
-				// Reading and use the LastChange parameter from our persistent store.
-				// This will ensure gap-free historic data.
-				DateTimeOffset StartTime = DateTimeOffset.MinValue;
-				if (UpdateTimeList.ContainsKey(point.Id))
+				// Only add points of type analog and digital - you can customise this
+				if (FilterNewPoint( point ))
 				{
-					StartTime = UpdateTimeList[point.Id];
-					Console.WriteLine("Add '" + point.FullName + "' from: " + StartTime.ToString() );
-				}
-				if (!Feeder.AddSubscription(point.FullName, StartTime))
-				{
-					Console.WriteLine("Error adding point. " + point.FullName);
-				}
-				else
-				{
-					int SubCount = Feeder.SubscriptionCount();
-					if (SubCount % 5000 == 0)
+					// Reading and use the LastChange parameter from our persistent store.
+					// This will ensure gap-free historic data.
+					DateTimeOffset StartTime = DateTimeOffset.MinValue;
+					if (UpdateTimeList.ContainsKey(point.Id))
 					{
-						Console.WriteLine("Points Watched: " + SubCount.ToString());
+						StartTime = UpdateTimeList[point.Id];
+						// Console.WriteLine("Add '" + point.FullName + "' from: " + StartTime.ToString() );
+					}
+					if (!Feeder.AddSubscription(point.FullName, StartTime))
+					{
+						Console.WriteLine("Error adding point. " + point.FullName);
+					}
+					else
+					{
+						int SubCount = Feeder.SubscriptionCount();
+						if (SubCount % 5000 == 0)
+						{
+							Console.WriteLine("Points Watched: " + SubCount.ToString());
+						}
 					}
 				}
 			}
@@ -447,32 +458,45 @@ namespace DataFeederApp
 			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set.
 			// Get Point properties, these will depend on type
 			object[] PointProperties = { "", 0, 0, "", 0, 0, 0};
+			PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
+			var ConfigUpdate = new ConfigChange();
 			try
 			{
-				PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
-				var ConfigUpdate = new ConfigChange
+				ConfigUpdate.PointId = Id;
+				ConfigUpdate.UpdateType = UpdateType;
+				ConfigUpdate.PointName = PointName;
+				ConfigUpdate.Timestamp = DateTimeOffset.UtcNow;
+				ConfigUpdate.ClassName = (string)PointProperties[0];
+				if (PointProperties[1] is float)
 				{
-					PointId = Id,
-					UpdateType = UpdateType,
-					PointName = PointName,
-					Timestamp = DateTimeOffset.UtcNow,
-					ClassName = (string)PointProperties[0],
-					FullScale = (double)(PointProperties[1] ?? (double)0),
-					ZeroScale = (double)(PointProperties[2] ?? (double)0),
-					Units = (string)(PointProperties[3] ?? ""),
-					BitCount = (byte)(PointProperties[4] ?? (byte)0),
-					Latitude = (double)(PointProperties[5] ?? (double)0),
-					Longitude = (double)(PointProperties[6] ?? (double)0)
-				};
-				string json = JsonConvert.SerializeObject(ConfigUpdate);
-				ExportString_WriteLine(json);
+					ConfigUpdate.FullScale = (float)(PointProperties[1] ?? (float)0);
+					ConfigUpdate.ZeroScale = (float)(PointProperties[2] ?? (float)0);
+				}
+				if (PointProperties[1] is double)
+				{
+					ConfigUpdate.FullScale = (double)(PointProperties[1] ?? (double)0);
+					ConfigUpdate.ZeroScale = (double)(PointProperties[2] ?? (double)0);
+				}
+				ConfigUpdate.Units = (string)(PointProperties[3] ?? "");
+				if (PointProperties[1] is byte)
+				{
+					ConfigUpdate.BitCount = (byte)(PointProperties[4] ?? (byte)0);
+				}
+				if (PointProperties[1] is ushort)
+				{
+					ConfigUpdate.BitCount = (ushort)(PointProperties[4] ?? (ushort)0);
+				}
+				ConfigUpdate.Latitude = (double)(PointProperties[5] ?? (double)0);
+				ConfigUpdate.Longitude = (double)(PointProperties[6] ?? (double)0);
 			}
 			catch (Exception e)
 			{
 				Console.WriteLine("Error reading properties for configuration: " + e.Message);
 			}
+			string json = JsonConvert.SerializeObject(ConfigUpdate);
+			ExportString_WriteLine(json);
 		}
-		
+
 		/// <summary>
 		/// Called when server state changes from Main or Standby, this stops all monitoring
 		/// </summary>
@@ -481,18 +505,24 @@ namespace DataFeederApp
 			Console.WriteLine("Engine Shutdown");
 			Continue = false;
 		}
-		
-		/// <summary>
-		/// Callback used to filter new points being added to configuration
-		/// In this case we say yes to all newly configured points
-		/// </summary>
-		/// <param name="FullName">Of the point (or accumulator)</param>
-		/// <returns>True to start watching this point</returns>
-		public static bool FilterNewPoint( string FullName)
-		{
-			return true;
-		}
 
+		/// <summary>
+		/// Callback used to filter new points being added to configuration.
+		/// Also used to filter points added to monitored list on startup.
+		/// In this example case we filter newly configured points to allow analog and digital (not string, time points).
+		/// </summary>
+		/// <param name="NewObject">Of the point (or accumulator)</param>
+		/// <returns>True to start watching this point</returns>
+		public static bool FilterNewPoint(ObjectDetails NewObject)
+		{
+			if (NewObject.ClassName.ToLower().Contains("analog") ||
+				NewObject.ClassName.ToLower().Contains("digital") ||
+				NewObject.ClassName.ToLower().Contains("binary") ||
+				NewObject.ClassName.ToLower().Contains("accumulator"))
+				return true;
+			else
+				return false;
+		}
 	}
 
 	// Data structure of exported data

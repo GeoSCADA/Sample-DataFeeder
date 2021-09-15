@@ -168,12 +168,13 @@ namespace FeederEngine
 				tags[0] = tag;
 				try
 				{
-					int LastReadCount = 100; // Keep reading until we have fewer than this, then there are no more left.
+					int LastReadCount = 1000; // Keep reading until we have fewer than this, then there are no more left.
 					do
 					{
 						// add a millisecond to last time to prevent read of sample already sent					
 						// add a millisecond to last change time to include latest value
 						// false = don't read boundaries (null values at each end of the interval)
+						//Console.Write("Read for: " + PointName);
 						var historicItems = AdvConnection.ReadRawHistory(LastChange.AddMilliseconds(1), ((DateTimeOffset)Update.Value).AddMilliseconds(1), LastReadCount, false, tags);
 						int historicItemCount = 0;
 						foreach (var hi in historicItems)
@@ -185,9 +186,10 @@ namespace FeederEngine
 								historicItemCount++;
 							}
 						}
+						//Console.WriteLine(" " + historicItemCount.ToString() + " for " + LastChange.ToString());
 						UpdateCount += historicItemCount;
 						LastReadCount = historicItemCount;
-					} while (LastReadCount == 100);
+					} while (LastReadCount == 1000);
 				}
 				catch (NullReferenceException)
 				{
@@ -226,7 +228,16 @@ namespace FeederEngine
 				ProcessNewData( DataType, Id, PointName, v, Timestamp, Quality);
 				return;
 			}
-			ProcessNewData( DataType, Id, PointName, (double)Value, Timestamp, Quality);
+			// If a point has never been processed it may be null. In this code we will set that to zero. Your solution may require other handling.
+			// This also ignores other non-numeric types like String and Time points, setting the value to zero. You may wish another approach.
+			if (Value is null || !(Value is byte || Value is sbyte || Value is ushort || Value is uint || Value is ulong || Value is short || Value is int || Value is long || Value is float || Value is double || Value is decimal))
+			{
+				ProcessNewData(DataType, Id, PointName, 0, Timestamp, Quality);
+			}
+			else
+			{
+				ProcessNewData(DataType, Id, PointName, (double)Value, Timestamp, Quality);
+			}
 		}
 
 		// Point is renamed
