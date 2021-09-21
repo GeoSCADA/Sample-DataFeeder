@@ -5,17 +5,27 @@ using ClearScada.Client; // Find ClearSCADA.Client.dll in the Program Files\Schn
 using ClearScada.Client.Advanced;
 using System.IO;
 using Newtonsoft.Json; // Bring in with nuget
-using Azure.Messaging.EventHubs.Producer;
-using System.Collections.Concurrent;
+using Newtonsoft.Json.Linq; // For JObject
 using FeederEngine;
+using System.Collections.Concurrent;
+// Adding for OMF Interfacing
+using System.IO.Compression;
+using System.Net;
+using System.Net.Http;
+using System.Text;
+
 
 // Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
-// This app writes output data in JSON format to Azure Event Hub.
+// This app writes output data in JSON format to an OSI Pi server or OCS Cloud server
 // It can easily be modified to change the format or output destination.
 
-// Azure Event Hubs: https://docs.microsoft.com/en-us/samples/azure/azure-sdk-for-net/azuremessagingeventhubs-samples/
+// Note that this export design has made specific choices which may or may not align with your needs.
+// The arrangement of Type, Container and Data are generalised here, but you may wish to restructure
+// them around templates and plant.
+// The Pi interface is not fully tested. Please feed back on the Exchange Forums.
 
 // Note that if Geo SCADA server state changes (e.g. Main to Fail or Standby to Main) then this program will stop.
+// If the Pi connection fails then the program also stops.
 // You can add more advanced behaviours as you wish, for example creating this as a service.
 namespace DataFeederApp
 {
@@ -44,7 +54,7 @@ namespace DataFeederApp
 		// When the AddSubscription method is called with a Start Time, that time will be adjusted if the time period
 		// (from then to now) is greater than this maximum age. Therefore when this export is restarted after a time
 		// gap of more than this age, then data will be missing from the export.
-		private static int MaxDataAgeDays = 1;
+		private static readonly int MaxDataAgeDays = 1;
 
 		// Stop signal - FeederEngine will set this to False when the SCADA server stops or changes state.
 		private static bool Continue;
@@ -53,8 +63,9 @@ namespace DataFeederApp
 		public static long UpdateCount = 0;
 		public static long BatchCount = 0;
 
-		// Data file location for output of last update times file
-		private static string FileBaseName = @"Feeder\Data.txt";
+		// Test data file for output of historic, current or configuration data
+		private static string FileBaseName = @"Feeder\ExportData.txt";
+
 		// last update times list
 		private static Dictionary<int, DateTimeOffset> UpdateTimeList;
 
@@ -62,17 +73,23 @@ namespace DataFeederApp
 		private static ServerNode node;
 		private static IServer AdvConnection;
 
-		// connection string to the Event Hubs namespace - replace this with your key
-		private const string connectionString = "Endpoint=sb://geoscada.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=wX/U1ODDN3vrDTmT33CCifsBSMWLlXYGixX0JI2Aohg=";
+		// The version of the OMFmessages
+		private const string OmfVersion = "1.1";
+		// HTTP client for OMF
+		private static readonly HttpClient _client = new HttpClient();
 
-		// name of the event hub - replace this with your hub name
-		private const string eventHubName = "telemetry";
-
-		private static ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
-
-		// The Event Hubs client types are safe to cache and use as a singleton for the lifetime
-		// of the application, which is best practice when events are being published or read regularly.
-		static EventHubProducerClient producerClient;
+		// In-memory queue of messages to be sent out
+		// A message has a type and a JSON string
+		public class OutputMessage
+		{
+			public string Type { get; set; }
+			public string Content { get; set; }
+		}
+		private static ConcurrentQueue<OutputMessage> OutputQueue = new ConcurrentQueue<OutputMessage>();
+		// Set this to limit packet size of requests to the target
+		private static readonly int TargetMaxBufferSize = 80000;
+		// List (usually 1) of endpoints to send to
+		private static IList<Endpoint> endpoints;
 
 		/// <summary>
 		/// Demo program showing simple data subscription and feed
@@ -81,9 +98,38 @@ namespace DataFeederApp
 		/// <returns></returns>
 		async static Task Main(string[] args)
 		{
-			// Azure Connection
-			// Create a producer client that you can use to send events to an event hub
-			producerClient = new EventHubProducerClient(connectionString, eventHubName);
+			// OSI PI or OCS Connection
+			// Step 1 - Read endpoint configurations from config.json
+			AppSettings settings = GetAppSettings();
+			endpoints = settings.Endpoints;
+
+			// A Type is like a point type - you could have different ones for analog, digital, time
+			// Our example has a simple numeric type. "FloatDynamicType"
+			// It's defined in a file in this code, you could define programmatically.
+			dynamic omfTypes = GetJsonFile("OMF-Types.json");
+
+			// Send messages and check for each endpoint in config.json
+			try
+			{
+				// Send out the messages that only need to be sent once
+				foreach (var endpoint in endpoints)
+				{
+					if ((endpoint.VerifySSL is bool boolean) && boolean == false)
+						Console.WriteLine("You are not verifying the certificate of the end point.  This is not advised for any system as there are security issues with doing this.");
+
+					// Send OMF Types
+					foreach (var omfType in omfTypes)
+					{
+						string omfTypeString = $"[{JsonConvert.SerializeObject(omfType)}]";
+						SendMessageToOmfEndpoint(endpoint, "type", omfTypeString);
+					}
+				}
+			}
+			catch (Exception e)
+			{
+				Console.WriteLine("Cannot connect to Pi: " + e.Message);
+				return;
+			}
 
 			// Geo SCADA Connection
 			node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
@@ -122,7 +168,7 @@ namespace DataFeederApp
 			Console.WriteLine("Connect to Feeder Engine.");
 
 			// For writing data
-			CreateExportString();
+			CreateExportBuffer();
 
 			// Read file of last update times
 			UpdateTimeList = ReadUpdateTimeList( FileBaseName);
@@ -165,7 +211,7 @@ namespace DataFeederApp
 					Console.WriteLine("End");
 
 					// Also flush data regularly
-					CloseOpenExportString();
+					CloseOpenExportBuffer();
 				}
 
 				await Task.Delay(1000); // You must pause to allow the database to serve other tasks. 
@@ -184,47 +230,257 @@ namespace DataFeederApp
 				}
 				LastQueue = PC;
 
-				await SendToAzureEventHub();
+				SendToPiServer();
 
 			} while (Continue);
+
 			// Finish by writing time list
 			WriteUpdateTimeList(FileBaseName, UpdateTimeList);
-
 			// Flush remaining data.
-			CloseOpenExportString();
-			await SendToAzureEventHub();
-			await producerClient.DisposeAsync(); // May execute this when terminating
+			CloseOpenExportBuffer();
+			SendToPiServer();
+			// Close Pi web Connection
+			_client.Dispose();
 		}
 
-		private static async Task SendToAzureEventHub()
+		/// <summary>
+		/// Gets the application settings
+		/// </summary>
+		public static AppSettings GetAppSettings()
 		{
-			// Dequeue to Azure
+			AppSettings settings = JsonConvert.DeserializeObject<AppSettings>(File.ReadAllText(Directory.GetCurrentDirectory() + "/appsettings.json"));
+
+			// check for optional/nullable parameters and invalid endpoint types
+			foreach (var endpoint in settings.Endpoints)
+			{
+				if (endpoint.VerifySSL == null)
+					endpoint.VerifySSL = true;
+				if (!(string.Equals(endpoint.EndpointType, "OCS", StringComparison.OrdinalIgnoreCase) || 
+					  string.Equals(endpoint.EndpointType, "EDS", StringComparison.OrdinalIgnoreCase) || 
+					  string.Equals(endpoint.EndpointType, "PI", StringComparison.OrdinalIgnoreCase)))
+					throw new Exception($"Invalid endpoint type {endpoint.EndpointType}");
+			}
+
+			return settings;
+		}
+
+		/// <summary>
+		/// Gets a json file in the current directory of name filename.
+		/// </summary>
+		public static dynamic GetJsonFile(string filename)
+		{
+			dynamic dynamicJson = JsonConvert.DeserializeObject(File.ReadAllText($"{Directory.GetCurrentDirectory()}/{filename}"));
+
+			return dynamicJson;
+		}
+
+		private static void SendToPiServer()
+		{
+			// Dequeue to MQTT
 			while (OutputQueue.Count > 0)
 			{
-				if (OutputQueue.TryDequeue(out String update))
+				if (OutputQueue.TryDequeue(out OutputMessage Message))
 				{
-					// Create a batch of events 
-					var eventBatch = await producerClient.CreateBatchAsync();
-					//EventDataBatch eventBatch = EventBatchTask.Result;
-
-					if (!eventBatch.TryAdd(new Azure.Messaging.EventHubs.EventData(System.Text.Encoding.UTF8.GetBytes(update))))
-					{
-						// if it is too large for the batch
-						throw new Exception($"Event is too large for the batch and cannot be sent.");
-					}
 					try
 					{
-						// Use the producer client to send the batch of events to the event hub
-						await producerClient.SendAsync(eventBatch);
+						foreach (var endpoint in endpoints)
+						{
+							// send data
+							SendMessageToOmfEndpoint(endpoint, Message.Type, Message.Content);
+						}
 						BatchCount++;
-						Console.WriteLine("Batch of data published: " + BatchCount.ToString());
+						//if (BatchCount % 100 == 0)
+						//	Console.WriteLine("Published: " + BatchCount.ToString() + " " + update.Substring(0,90) + "...");
 					}
 					catch (Exception e)
 					{
-						Console.WriteLine("*** Error sending events: " + e.Message);
+						Console.WriteLine("*** Error sending message: " + e.Message);
+						// Some handling here should persist the dequeued and queued data and retry
 					}
 				}
 			}
+		}
+
+		/// <summary>
+		/// Gets the token for auth for connecting
+		/// </summary>
+		/// <param name="endpoint">The endpoint to retieve a token for</param>
+		public static string GetToken(Endpoint endpoint)
+		{
+			if (endpoint == null)
+			{
+				throw new ArgumentNullException(nameof(endpoint));
+			}
+
+			// PI and EDS currently require no auth
+			if (endpoint.EndpointType != "OCS")
+				return null;
+
+			// use cached version
+			if (!string.IsNullOrWhiteSpace(endpoint.Token))
+				return endpoint.Token;
+
+			var request = new HttpRequestMessage()
+			{
+				Method = HttpMethod.Get,
+				RequestUri = new Uri(endpoint.Resource + "/identity/.well-known/openid-configuration"),
+			};
+			request.Headers.Add("Accept", "application/json");
+
+			string res = Send(request).Result;
+			var objectContainingURLForAuth = JsonConvert.DeserializeObject<JObject>(res);
+
+			var data = new Dictionary<string, string>
+			{
+			   { "client_id", endpoint.ClientId },
+			   { "client_secret", endpoint.ClientSecret },
+			   { "grant_type", "client_credentials" },
+			};
+
+			var request2 = new HttpRequestMessage()
+			{
+				Method = HttpMethod.Post,
+				RequestUri = new Uri(objectContainingURLForAuth["token_endpoint"].ToString()),
+				Content = new FormUrlEncodedContent(data),
+			};
+			request2.Headers.Add("Accept", "application/json");
+
+			string res2 = Send(request2).Result;
+
+			var tokenObject = JsonConvert.DeserializeObject<JObject>(res2);
+			endpoint.Token = tokenObject["access_token"].ToString();
+			return endpoint.Token;
+		}
+
+		/// <summary>
+		/// Send message using HttpRequestMessage
+		/// </summary>
+		public static async Task<string> Send(HttpRequestMessage request)
+		{
+			var response = await _client.SendAsync(request).ConfigureAwait(false);
+
+			var responseString = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+
+			if (!response.IsSuccessStatusCode)
+				throw new Exception($"Error sending OMF response code:{response.StatusCode}.  Response {responseString}");
+			return responseString;
+		}
+
+		/// <summary>
+		/// Actual async call to send message to omf endpoint
+		/// </summary>
+		public static string Send(WebRequest request)
+		{
+			if (request == null)
+			{
+				throw new ArgumentNullException(nameof(request));
+			}
+
+			try
+			{
+				var resp = request.GetResponse();
+				var response = (HttpWebResponse)resp;
+				var stream = resp.GetResponseStream();
+				var code = (int)response.StatusCode;
+
+				var reader = new StreamReader(stream);
+
+				// Read the content.  
+				string responseString = reader.ReadToEnd();
+
+				// Display the content.
+				return responseString;
+			}
+			catch (WebException e)
+			{
+				WebResponse response = e.Response;
+				var httpResponse = (HttpWebResponse)response;
+
+				// catch 409 errors as they indicate that the Type already exists
+				if (httpResponse.StatusCode == HttpStatusCode.Conflict)
+					return string.Empty;
+				throw;
+			}
+		}
+
+		/// <summary>
+		/// Sends message to the preconfigured omf endpoint
+		/// </summary>
+		/// <param name="endpoint">The endpoint to send an OMF message to</param>
+		/// <param name="messageType">The OMF message type</param>
+		/// <param name="dataJson">The message payload in a string format</param>
+		/// <param name="action">The action for the OMF endpoint to conduct</param>
+		public static void SendMessageToOmfEndpoint(Endpoint endpoint, string messageType, string dataJson, string action = "create")
+		{
+			//Console.WriteLine($"{messageType} ({dataJson.Length}) {dataJson.Substring(0,200)}");
+			if (endpoint == null)
+			{
+				throw new ArgumentNullException(nameof(endpoint));
+			}
+
+			// create a request
+			var request = WebRequest.Create(new Uri(endpoint.OmfEndpoint));
+			request.Method = "post";
+
+			// add headers to request
+			request.Headers.Add("messagetype", messageType);
+			request.Headers.Add("action", action);
+			request.Headers.Add("messageformat", "JSON");
+			request.Headers.Add("omfversion", OmfVersion);
+			if (string.Equals(endpoint.EndpointType, "OCS", StringComparison.OrdinalIgnoreCase))
+			{
+				request.Headers.Add("Authorization", "Bearer " + GetToken(endpoint));
+			}
+			else if (string.Equals(endpoint.EndpointType, "PI", StringComparison.OrdinalIgnoreCase))
+			{
+				request.Headers.Add("x-requested-with", "XMLHTTPRequest");
+				request.Credentials = new NetworkCredential(endpoint.Username, endpoint.Password);
+			}
+
+			// compress dataJson if configured for compression
+			byte[] byteArray;
+
+			if (!endpoint.UseCompression)
+			{
+				request.ContentType = "application/json";
+				byteArray = Encoding.UTF8.GetBytes(dataJson);
+			}
+			else
+			{
+				request.ContentType = "application/x-www-form-urlencoded";
+				using (var msi = new MemoryStream(Encoding.UTF8.GetBytes(dataJson)))
+				using (var mso = new MemoryStream())
+				{
+					using (var gs = new GZipStream(mso, CompressionMode.Compress))
+					{
+						// copy bytes from msi to gs
+						byte[] bytes = new byte[4096];
+
+						int cnt;
+
+						while ((cnt = msi.Read(bytes, 0, bytes.Length)) != 0)
+						{
+							gs.Write(bytes, 0, cnt);
+						}
+					}
+
+					byteArray = mso.ToArray();
+				}
+
+				request.Headers.Add("compression", "gzip");
+			}
+
+			request.ContentLength = byteArray.Length;
+
+			Stream dataStream = request.GetRequestStream();
+
+			// Write the data to the request stream.  
+			dataStream.Write(byteArray, 0, byteArray.Length);
+
+			// Close the Stream object.  
+			dataStream.Close();
+
+			Send(request);
 		}
 
 		/// <summary>
@@ -281,6 +537,7 @@ namespace DataFeederApp
 						{
 							Console.WriteLine("Points Watched: " + SubCount.ToString());
 						}
+						//Console.WriteLine("Add: " + point.FullName);
 					}
 				}
 			}
@@ -343,45 +600,98 @@ namespace DataFeederApp
 			}
 		}
 
-		// For Azure EventHub we have a simple string, appended for new data and 
-		static string ExportString = "";
-		static int StringCount = 0;
-		static int ExportStringInitialLength = 0;
-		public static void CreateExportString()
+		// For Pi we have a simple string, appended for new data 
+		// Each message bulks individual JSON objects into a JSON array. 
+		// Within a given array, all objects must be of the same message type: "type", "container", or "data".
+		// So, we can only fill the string with one type, so we monitor this with ExportMessageType and send buffer whenever type changes.
+		// BUT - while data messages from Geo SCADA are single Data messages to Pi, a Configuration message from Geo SCADA will
+		// consist of a Container message and a Data message. For many points, alternating these messages will be very inefficient.
+		// So we have to retain a separate ExportBufferConfig for the Data messages and send it straight after any Containers
+		static string ExportMessageType = "";
+		static string ExportBuffer = "";
+		static string ExportBufferConfig = "";
+		public static void CreateExportBuffer()
 		{
-			StringCount++;
-			ExportString = "{\"dataTime\":\"" + DateTimeOffset.UtcNow.ToString() + "." + DateTimeOffset.UtcNow.ToString("fff") + "\",\"data\":["; // Wrap individual items as an array
-			ExportStringInitialLength = ExportString.Length;
+			ExportBuffer = "{"; // Wrap individual items as an array
+			ExportBufferConfig = "{";
 		}
 
-		public static void CloseOpenExportString()
+		// Empty the ExportBuffer and ExportBufferConfig into the OutputQueue
+		public static void CloseOpenExportBuffer()
 		{
 			// If data exists to export
-			if (ExportString.Length > ExportStringInitialLength)
+			if (ExportBuffer.Length > 1)
 			{
-				ExportString += "]}";
+				ExportBuffer += "}";
 
-				// Console.WriteLine(ExportString.Substring(0, 120) + "...");
-				OutputQueue.Enqueue(ExportString);
-
-				// Start gathering next
-				CreateExportString();
+				// Console.WriteLine(ExportBuffer.Substring(0, 120) + "...");
+				var Message = new OutputMessage
+				{
+					Type = ExportMessageType,
+					Content = ExportBuffer
+				};
+				OutputQueue.Enqueue(Message);
 			}
+			if (ExportBufferConfig.Length > 1)
+			{
+				ExportBufferConfig += "}";
+
+				// Console.WriteLine(ExportBufferConfig.Substring(0, 120) + "...");
+				var Message = new OutputMessage
+				{
+					Type = "data",	// The Config buffer is treated by Pi as a Data message
+					Content = ExportBufferConfig
+				};
+				OutputQueue.Enqueue(Message);
+			}
+			// Start gathering next
+			CreateExportBuffer();
+			// Ready for a new message type
+			ExportMessageType = "";
 		}
 
-		public static void ExportString_WriteLine(string Out)
+		// 3 types of message are added: "container", "configdata" and "data"
+		// "configdata" is actually "data", but relates to point configuration
+		// We can only send arrays of one type in a buffer, so have to close the buffer when the type changes
+		// But "container" and "configdata" will alternate, so be very inefficient unless we cache "configdata" separately
+		// and output "container" and then "configdata" when buffers are full or we receive "data"
+		public static void ExportBuffer_WriteLine(string Out, string MessageType)
 		{
-			// Create a new file after <80K (e.g. billed message size of Azure)
-			if (ExportString.Length > 80000)
+			// If "configdata" then add to different buffer
+			if (MessageType == "configdata")
 			{
-				CloseOpenExportString();
+				// Create a new file after <TargetMaxBufferSize (e.g. set by behaviour of target Pi system)
+				if (ExportBufferConfig.Length > TargetMaxBufferSize )
+				{
+					CloseOpenExportBuffer();
+				}
+				// Don't write a comma in the first entry
+				if (ExportBufferConfig.Length > 1)
+				{
+					ExportBufferConfig += ",";
+				}
+				ExportBufferConfig += Out;
 			}
-			// Don't write a comma in the first entry
-			if (ExportString.Length > ExportStringInitialLength)
+			else
 			{
-				ExportString += ",";
+				// If first message, set the type
+				if (ExportMessageType == "")
+				{
+					ExportMessageType = MessageType;
+				}
+				// Create a new file after <TargetMaxBufferSize (e.g. set by behaviour of target Pi system), OR when message type changes
+				if (ExportBuffer.Length > TargetMaxBufferSize ||
+					ExportMessageType != MessageType)
+				{
+					CloseOpenExportBuffer();
+				}
+				// Don't write a comma in the first entry
+				if (ExportBuffer.Length > 1)
+				{
+					ExportBuffer += ",";
+				}
+				ExportBuffer += Out;
 			}
-			ExportString += Out;
 		}
 
 		/// <summary>
@@ -402,20 +712,22 @@ namespace DataFeederApp
 				EngineShutdown();
 				return;
 			}
-			var DataUpdate = new DataVQT
+			// Construct JSON
+			var DataUpdateItem = new OMF_DataValueItem
 			{
-				PointId = Id,
-				UpdateType = UpdateType,
-				PointName = PointName,
+				Timestamp = Timestamp,
 				Value = Value,
-				Timestamp = Timestamp, // For your application, periodically buffer this to use as the LastChange parameter on restarting.
-									   // This enables gap-free data historic data.
-				OPCQuality = ((int)(Quality) & 255),
-				ExtendedQuality = ((int)(Quality) / 256)
+				Quality = Quality
+			};
+			OMF_DataValueItem [] DataUpdateItemArray = { DataUpdateItem };
+			var DataUpdate = new OMF_DataValue
+			{
+				containerid = PointName,
+				values = DataUpdateItemArray
 			};
 			string json = JsonConvert.SerializeObject(DataUpdate);
 
-			ExportString_WriteLine(json);
+			ExportBuffer_WriteLine(json, "data");
 
 			// Update id and Date in the list
 			if (UpdateTimeList.ContainsKey( Id) )
@@ -436,6 +748,18 @@ namespace DataFeederApp
 		/// <param name="PointName"></param>
 		public static void ProcessNewConfig(string UpdateType, int Id, string PointName)
 		{
+			// Output of configuration to Pi is in two messages, a Container and a Data message we'll call "configdata"
+			var Container = new OMF_Container
+			{
+				id = PointName,
+				typeVersion = "1.0.0",
+				typeid = "FloatDynamicType"
+			};
+			string json = JsonConvert.SerializeObject(Container);
+			ExportBuffer_WriteLine(json, "container");
+
+			// Now for the ConfigData
+
 			// Could add further code to get point configuration fields and types to export, 
 			// e.g. GPS locations, analogue range, digital states etc.
 			// Note that this would increase start time and database load during start, 
@@ -443,12 +767,12 @@ namespace DataFeederApp
 			// Get Point properties, these will depend on type
 			object[] PointProperties = { "", 0, 0, "", 0, 0, 0};
 			PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
-			var ConfigUpdate = new ConfigChange();
+			var ConfigUpdate = new OMF_DataObjectItem();
 			try
 			{
-				ConfigUpdate.PointId = Id;
+				ConfigUpdate.Id = Id;
 				ConfigUpdate.UpdateType = UpdateType;
-				ConfigUpdate.PointName = PointName;
+				ConfigUpdate.FullName = PointName;
 				ConfigUpdate.Timestamp = DateTimeOffset.UtcNow;
 				ConfigUpdate.ClassName = (string)PointProperties[0];
 				if (PointProperties[1] is float)
@@ -477,8 +801,16 @@ namespace DataFeederApp
 			{
 				Console.WriteLine("Error reading properties for configuration: " + e.Message);
 			}
-			string json = JsonConvert.SerializeObject(ConfigUpdate);
-			ExportString_WriteLine(json);
+			OMF_DataObjectItem[] DataObjectItemArray = { ConfigUpdate };
+			var DataUpdate = new OMF_DataObject
+			{
+				containerid = PointName,
+				values = DataObjectItemArray
+			};
+			json = JsonConvert.SerializeObject(DataUpdate);
+			// Use "configdata" to indicate this message is related to configuration, interleaved with "container"
+			// but sent in separate blocks of "container" and "data".
+			ExportBuffer_WriteLine(json, "configdata");
 		}
 
 		/// <summary>
@@ -516,32 +848,5 @@ namespace DataFeederApp
 				return false;
 			}
 		}
-	}
-
-	// Data structure of exported data
-	public class DataVQT
-	{
-		public int PointId;
-		public string UpdateType;
-		public string PointName;
-		public double Value;
-		public DateTimeOffset Timestamp;
-		public int OPCQuality;
-		public int ExtendedQuality;
-	}
-	// Data structure of configuration data
-	public class ConfigChange
-	{
-		public int PointId;
-		public string UpdateType;
-		public string PointName;
-		public DateTimeOffset Timestamp;
-		public string ClassName;
-		public Double FullScale;
-		public Double ZeroScale;
-		public string Units;
-		public int BitCount;
-		public Double Latitude;
-		public Double Longitude;
 	}
 }

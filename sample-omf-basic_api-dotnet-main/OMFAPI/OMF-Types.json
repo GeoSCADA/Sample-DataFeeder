@@ -1,0 +1,75 @@
+[
+  {
+    "id": "FirstDynamicType",
+    "name": "First dynamic type",
+    "classification": "dynamic",
+    "type": "object",
+    "description": "This is the first dynamic type",
+    "properties": {
+      "Timestamp": {
+        "format": "date-time",
+        "type": "string",
+        "isindex": true,
+        "description": "Timestamp property as index"
+      },
+      "IntegerProperty": {
+        "type": "integer",
+        "description": "PI point data referenced integer attribute",
+        "uom": "count"
+      }
+    }
+  },
+  {
+    "id": "SecondDynamicType",
+    "name": "Second dynamic type",
+    "classification": "dynamic",
+    "type": "object",
+    "description": "This is the second dynamic type",
+    "properties": {
+      "Timestamp": {
+        "format": "date-time",
+        "type": "string",
+        "isindex": true,
+        "description": "Timestamp property as index"
+      },
+      "NumberProperty1": {
+        "type": "number",
+        "description": "PI point data referenced number attribute 1",
+        "format": "float64",
+        "uom": "%"
+      },
+      "NumberProperty2": {
+        "type": "number",
+        "description": "PI point data referenced number attribute 2",
+        "format": "float64",
+        "uom": "V"
+      },
+      "StringEnum": {
+        "type": "string",
+        "enum": [ "False", "True" ],
+        "description": "String enumeration to replace boolean type"
+      }
+    }
+  },
+  {
+    "id": "ThirdDynamicType",
+    "name": "Third dynamic type",
+    "classification": "dynamic",
+    "type": "object",
+    "description": "This is the third dynamic type",
+    "properties": {
+      "Timestamp": {
+        "format": "date-time",
+        "type": "string",
+        "isindex": true,
+        "description": "Timestamp property as index"
+      },
+      "IntegerEnum": {
+        "type": "integer",
+        "format": "int16",
+        "enum": [ 0, 1 ],
+        "description": "Integer enumeration to replace boolean type"
+      }
+    }
+  }
+]

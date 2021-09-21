@@ -1,0 +1,40 @@
+[
+  {
+    "containerid": "FirstContainer",
+    "values": [
+      {
+        "Timestamp": null,
+        "IntegerProperty": null
+      }
+    ]
+  },
+  {
+    "containerid": "SecondContainer",
+    "values": [
+      {
+        "Timestamp": null,
+        "IntegerProperty": null
+      }
+    ]
+  },
+  {
+    "containerid": "ThirdContainer",
+    "values": [
+      {
+        "Timestamp": null,
+        "NumberProperty1": null,
+        "NumberProperty2": null,
+        "StringEnum": null
+      }
+    ]
+  },
+  {
+    "containerid": "FourthContainer",
+    "values": [
+      {
+        "Timestamp": null,
+        "IntegerEnum": null
+      }
+    ]
+  }
+]

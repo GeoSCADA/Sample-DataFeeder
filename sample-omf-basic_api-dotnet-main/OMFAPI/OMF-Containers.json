@@ -1,0 +1,18 @@
+[
+  {
+    "id": "FirstContainer",
+    "typeid": "FirstDynamicType"
+  },
+  {
+    "id": "SecondContainer",
+    "typeid": "FirstDynamicType"
+  },
+  {
+    "id": "ThirdContainer",
+    "typeid": "SecondDynamicType"
+  },
+  {
+    "id": "FourthContainer",
+    "typeid": "ThirdDynamicType"
+  }
+]

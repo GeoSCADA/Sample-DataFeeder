@@ -432,18 +432,27 @@ namespace DataFeederApp
 		/// Callback used to filter new points being added to configuration.
 		/// Also used to filter points added to monitored list on startup.
 		/// In this example case we filter newly configured points to allow analog and digital (not string, time points).
+		/// Also remove template points.
 		/// </summary>
 		/// <param name="NewObject">Of the point (or accumulator)</param>
 		/// <returns>True to start watching this point</returns>
 		public static bool FilterNewPoint(ObjectDetails NewObject)
 		{
-			if (NewObject.ClassName.ToLower().Contains("analog") ||
+			if (NewObject.TemplateId == -1 &&
+				(NewObject.ClassName.ToLower().Contains("analog") ||
+				NewObject.ClassName.ToLower().Contains("algmanual") ||
 				NewObject.ClassName.ToLower().Contains("digital") ||
 				NewObject.ClassName.ToLower().Contains("binary") ||
-				NewObject.ClassName.ToLower().Contains("accumulator"))
+				NewObject.ClassName.ToLower().Contains("accumulator")))
+			{
+				//Console.WriteLine("Add: " + NewObject.FullName);
 				return true;
+			}
 			else
+			{
+				//Console.WriteLine("Ignore: " + NewObject.FullName);
 				return false;
+			}
 		}
 	}
 

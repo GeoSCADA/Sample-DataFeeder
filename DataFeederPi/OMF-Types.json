@@ -1,0 +1,80 @@
+﻿[
+  {
+    "id": "FloatDynamicType",
+    "version": "1.0.0.0",
+    "name": "Float dynamic type",
+    "classification": "dynamic",
+    "type": "object",
+    "description": "Floating point number from Geo SCADA",
+    "properties": {
+      "Timestamp": {
+        "format": "date-time",
+        "type": "string",
+        "isindex": true,
+        "description": "Timestamp property as index"
+      },
+      "Value": {
+        "type": "number",
+        "description": "Point value",
+        "format": "float64"
+      },
+      "Quality": {
+        "type": "number",
+        "description": "Point OPC quality",
+        "format": "int16",
+        "uom": "OPC Quality"
+      }
+    }
+  },
+  {
+    "id": "ObjectType",
+    "version": "1.0.0.0",
+    "type": "object",
+    "classification": "static",
+    "properties": {
+      "FullName": {
+        "type": "string",
+        "isindex": true,
+        "isname": true
+      },
+      "Id": {
+        "type": "integer",
+        "format": "int32"
+      },
+      "UpdateType": {
+        "type": "string"
+      },
+      "Timestamp": {
+        "type": "string",
+        "format": "date-time",
+        "description": "When point added by data feeder or configuration was changed."
+      },
+      "ClassName": {
+        "type": "string"
+      },
+      "FullScale": {
+        "type": "number",
+        "format": "float64"
+      },
+      "ZeroScale": {
+        "type": "number",
+        "format": "float64"
+      },
+      "Units": {
+        "type": "string"
+      },
+      "BitCount": {
+        "type": "integer",
+        "format": "int16"
+      },
+      "Latitude": {
+        "type": "number",
+        "format": "float64"
+      },
+      "Longitude": {
+        "type": "number",
+        "format": "float64"
+      }
+    }
+  }
+]
