@@ -518,7 +518,7 @@ namespace DataFeederApp
 		{
 			if (NewObject.TemplateId == -1 &&
 				(NewObject.ClassName.ToLower().Contains("analog") ||
-				NewObject.ClassName.ToLower().Contains("algmanual") ||
+				NewObject.ClassName.ToLower().Contains("alg") ||
 				NewObject.ClassName.ToLower().Contains("digital") ||
 				NewObject.ClassName.ToLower().Contains("binary") ||
 				NewObject.ClassName.ToLower().Contains("accumulator")))
