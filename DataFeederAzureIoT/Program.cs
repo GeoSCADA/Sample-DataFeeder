@@ -86,25 +86,32 @@ namespace DataFeederApp
 			producerClient = new EventHubProducerClient(connectionString, eventHubName);
 
 			// Geo SCADA Connection
-			node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
+			// Older Geo SCADA node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
+			node = new ServerNode("127.0.0.1", 5481);
 			try
 			{
-				AdvConnection = node.Connect("Utility", false);
+				// Older Geo SCADA: AdvConnection = node.Connect("Utility", false);
+				var ConSet = new ClientConnectionSettings();
+				AdvConnection = node.Connect("Utility", ConSet);
 			}
 			catch
 			{
 				Console.WriteLine("Cannot connect to Geo SCADA");
 				return;
 			}
-			// Good practice means storing credentials with reversible encryption, not adding them to code as here.
+			// Good practice means storing credentials with reversible encryption, not adding them to code or using parameters as here.
+			if (args.Length != 2)
+			{
+				Console.WriteLine("Requires user name and password as command line arguments.");
+			}
 			var spassword = new System.Security.SecureString();
-			foreach (var c in "AdminExample")
+			foreach (var c in args[1])
 			{
 				spassword.AppendChar(c);
 			}
 			try
 			{
-				AdvConnection.LogOn("AdminExample", spassword);
+				AdvConnection.LogOn(args[0], spassword);
 			}
 			catch
 			{
