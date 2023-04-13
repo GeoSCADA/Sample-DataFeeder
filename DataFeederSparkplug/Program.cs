@@ -8,6 +8,8 @@ using Newtonsoft.Json; // Bring in with nuget
 using FeederEngine;
 using System.Collections.Concurrent;
 using uPLibrary.Networking.M2Mqtt; // Bring in with nuget
+using Google.Protobuf;
+using Org.Eclipse.Tahu.Protobuf;
 
 // Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
 // This app writes output data in JSON format to an MQTT server
@@ -52,7 +54,7 @@ namespace DataFeederApp
 		public static long UpdateCount = 0;
 		public static long BatchCount = 0;
 
-		// Test data file for output of historic, current or configuration data
+		// Data file for output of date/time file of export progress
 		private static string FileBaseName = @"Feeder\ExportData.txt";
 
 		// last update times list
@@ -68,11 +70,20 @@ namespace DataFeederApp
 		// Connection parameters
 		private static string MQTTServerName = "192.168.86.123";
 		private static int MQTTServerPort = 1883;
-		private static string MQTTClientName = "Geo SCADA Data Feeder 1";
-		private static string MQTTTopicName = "Geo SCADA";
+		private static string MQTTClientName = "SpClient1";
+		private static string SpGroupId = "SCADA"; // Specific to this server
+		private static string SpNode = "System1"; // Could use the base group name for this
+		private static string SpDevice = "Device1"; // And the next level group name for this
 
 		// In-memory queue of messages to be sent out
+		// To be removed
 		private static ConcurrentQueue<string> OutputQueue = new ConcurrentQueue<string>();
+
+		// Sparkplug Birth Message - accumulates all points, gets sent when values come in
+		private static Payload BirthMessage = new Payload();
+
+		// Sparkplug Data Message - buffers data changes until full, then gets sent
+		private static Payload DataMessage = new Payload();
 
 		/// <summary>
 		/// Demo program showing simple data subscription and feed
@@ -89,9 +100,14 @@ namespace DataFeederApp
 				Client.ProtocolVersion = MqttProtocolVersion.Version_3_1_1;
 				// Events
 				Client.ConnectionClosed += Client_MqttConnectionClosed;
+				Client.MqttMsgPublishReceived += Client_MqttMsgPublishReceived;
 				// Connect
 				Client.Connect(MQTTClientName, "", "", true, 3600);
 				// No username and password above, you can use Client.Connect(MQTTClientName, username, password ...);
+				string[] SubTopics = { $"spBv1.0/{SpGroupId}/NCMD{SpNode}/#",
+									   $"spBv1.0/{SpGroupId}/DCMD{SpNode}/{SpDevice}/#" };
+				byte[] SubQoS = { 1, 1 };
+				Client.Subscribe( SubTopics, SubQoS);
 			}
 			catch
 			{
@@ -100,13 +116,10 @@ namespace DataFeederApp
 			}
 
 			// Geo SCADA Connection
-			// Older Geo SCADA node = new ServerNode(ClearScada.Client.ConnectionType.Standard, "127.0.0.1", 5481);
 			node = new ServerNode("127.0.0.1", 5481);
 			try
 			{
-				// Older Geo SCADA: AdvConnection = node.Connect("Utility", false);
-				var ConSet = new ClientConnectionSettings();
-				AdvConnection = node.Connect("Utility", ConSet);
+				AdvConnection = node.Connect("Utility", new ClientConnectionSettings());
 			}
 			catch
 			{
@@ -133,7 +146,7 @@ namespace DataFeederApp
 				return;
 			}
 			Console.WriteLine("Logged on.");
-			
+
 			// Set up connection, read rate and the callback function/action for data processing
 			if (!Feeder.Connect(AdvConnection, true, true, UpdateIntervalHisSec, UpdateIntervalCurSec, MaxDataAgeDays, ProcessNewData, ProcessNewConfig, EngineShutdown, FilterNewPoint))
 			{
@@ -146,7 +159,7 @@ namespace DataFeederApp
 			CreateExportString();
 
 			// Read file of last update times
-			UpdateTimeList = ReadUpdateTimeList( FileBaseName);
+			UpdateTimeList = ReadUpdateTimeList(FileBaseName);
 
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
@@ -275,7 +288,7 @@ namespace DataFeederApp
 			foreach (var point in objects)
 			{
 				// Only add points of type analog and digital - you can customise this
-				if (FilterNewPoint( point ))
+				if (FilterNewPoint(point))
 				{
 					// Reading and use the LastChange parameter from our persistent store.
 					// This will ensure gap-free historic data.
@@ -339,7 +352,7 @@ namespace DataFeederApp
 		{
 			// First write to a temporary file
 			StreamWriter UpdateTimeListFile = new StreamWriter(Path.GetDirectoryName(FileBase) + "\\" + "UpdateTimeList new.csv");
-			foreach( KeyValuePair<int, DateTimeOffset> entry in UpdateTimeList)
+			foreach (KeyValuePair<int, DateTimeOffset> entry in UpdateTimeList)
 			{
 				UpdateTimeListFile.WriteLine(entry.Key.ToString() + "," + entry.Value.ToString());
 			}
@@ -365,7 +378,72 @@ namespace DataFeederApp
 			Continue = false;
 		}
 
-		// For MQTT we have a simple string, appended for new data 
+		private static void Client_MqttMsgPublishReceived(object sender, uPLibrary.Networking.M2Mqtt.Messages.MqttMsgPublishEventArgs e)
+		{
+			// handle message received 
+			string t = e.Topic;
+
+			Console.WriteLine("Received from: " + sender.ToString() + " Topic: " + t + " Message Length: " + e.Message.Length);
+			var tokens = t.Split('/');
+			if (	(tokens[0] == "spBv1.0") && 
+					(tokens[1] == SpGroupId) && 
+					( (tokens[2] == "NCMD" ) || (tokens[2] == "DCMD") )&& 
+					(tokens[3] == SpNode) )
+			{
+				Payload inboundPayload; // Parse SpB Protobuf into object structure
+				try
+				{
+					inboundPayload = Payload.Parser.ParseFrom(e.Message);
+				}
+				catch (Exception ex)
+				{
+					Console.WriteLine("Error interpreting Data Payload. " + ex.Message);
+					return;
+				}
+				foreach (var metric in inboundPayload.Metrics)
+				{
+					switch (metric.Name)
+					{
+						case "Node Control/Next Server":
+							//# 'Node Control/Next Server' is an NCMD used to tell the device/client application to
+							//# disconnect from the current MQTT server and connect to the next MQTT server in the
+							//# list of available servers.  This is used for clients that have a pool of MQTT servers
+							//# to connect to.
+							Console.WriteLine("'Node Control/Next Server' is not implemented in this example");
+							break;
+						case "Node Control/Rebirth":
+							//# 'Node Control/Rebirth' is an NCMD used to tell the device/client application to resend
+							//# its full NBIRTH and DBIRTH again.  MQTT Engine will send this NCMD to a device/client
+							//# application if it receives an NDATA or DDATA with a metric that was not published in the
+							//# original NBIRTH or DBIRTH.  This is why the application must send all known metrics in
+							//# its original NBIRTH and DBIRTH messages.
+							//publishBirth();
+							break;
+						case "Node Control/Reboot":
+							//# 'Node Control/Reboot' is an NCMD used to tell a device/client application to reboot
+							//# This can be used for devices that need a full application reset via a soft reboot.
+							//# In this case, we fake a full reboot with a republishing of the NBIRTH and DBIRTH
+							//# messages.
+							//publishBirth();
+							break;
+						default:
+							Console.WriteLine("Unknown Command");
+							break;
+					}
+				}
+			}
+			else
+			{
+				Console.WriteLine("Unknown Command");
+			}
+		}
+
+		// For Sparkplug we have a payload collection, appended for new data 
+		// A (collection of) Birth payloads define metric/properties
+		// A collection of Data payloads define metric values
+
+		static Payload[] ExportBirthPayloads = { };
+		static Payload[] ExportDataPayloads = { };
 
 		static string ExportString = "";
 		static int StringCount = 0;
@@ -441,16 +519,16 @@ namespace DataFeederApp
 			ExportString_WriteLine(json);
 
 			// Update id and Date in the list
-			if (UpdateTimeList.ContainsKey( Id) )
+			if (UpdateTimeList.ContainsKey(Id))
 			{
-				UpdateTimeList[ Id ] = Timestamp;
+				UpdateTimeList[Id] = Timestamp;
 			}
 			else
 			{
 				UpdateTimeList.Add(Id, Timestamp);
 			}
 		}
-		
+
 		/// <summary>
 		/// Write out received configuration data
 		/// </summary>
@@ -464,7 +542,7 @@ namespace DataFeederApp
 			// Note that this would increase start time and database load during start, 
 			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set.
 			// Get Point properties, these will depend on type
-			object[] PointProperties = { "", 0, 0, "", 0, 0, 0};
+			object[] PointProperties = { "", 0, 0, "", 0, 0, 0 };
 			PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
 			var ConfigUpdate = new ConfigChange();
 			try

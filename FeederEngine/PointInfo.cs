@@ -22,6 +22,11 @@ namespace FeederEngine
 		static bool ServerConnect = false;
 		Action<string, int, string, double, DateTimeOffset, long> ProcessNewData;
 
+		// Get Historic stats
+		public static int HisCallCount = 0;
+		public static double HisCallSeconds = 0;
+		public static DateTime HisCallLastReported = DateTime.UtcNow;
+
 		// Constructor
 		public PointInfo(int _TagId, string _PointName, int _ReadSecondsHis, int _ReadSecondsCur, DateTimeOffset _LastChange, IServer _AdvConnection, Action<string, int, string, double, DateTimeOffset, long> _ProcessNewData)
 		{
@@ -175,7 +180,18 @@ namespace FeederEngine
 						// add a millisecond to last change time to include latest value
 						// false = don't read boundaries (null values at each end of the interval)
 						//Console.Write("Read for: " + PointName);
+						var timeNow = DateTime.UtcNow;
 						var historicItems = AdvConnection.ReadRawHistory(LastChange.AddMilliseconds(1), ((DateTimeOffset)Update.Value).AddMilliseconds(1), LastReadCount, false, tags);
+						
+						// Report every minute how many historic calls and in-call process time
+						HisCallCount++;
+						HisCallSeconds += DateTime.UtcNow.Subtract(timeNow).TotalSeconds;
+						if (DateTime.UtcNow.Subtract(HisCallLastReported).TotalSeconds > 60)
+						{
+							Console.WriteLine($">>Calls to get history: {HisCallCount}, Total call time: {HisCallSeconds}");
+							HisCallLastReported = DateTime.UtcNow;
+						}
+
 						int historicItemCount = 0;
 						foreach (var hi in historicItems)
 						{

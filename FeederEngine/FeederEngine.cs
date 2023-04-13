@@ -32,7 +32,7 @@ namespace FeederEngine
 
 		// Dict of PointInfo
 		private static ConcurrentDictionary<int, PointInfo> PointDictionary = new ConcurrentDictionary<int, PointInfo>();
-		private static int NextKey = 1;
+		private static int NextKey = 1000;
 		private static ServerState CurrentServerState = ServerState.None;
 		// Dict of Updates
 		private static ConcurrentQueue<CustomTagUpdate> UpdateQueue = new ConcurrentQueue<CustomTagUpdate>();

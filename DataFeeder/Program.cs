@@ -32,8 +32,8 @@ namespace DataFeederApp
 		// is the minimum time interval that changes will be detected. If you are scanning data sources every
 		// 30 seconds with NO history and you want every update, then set this interval to match. 
 		// Setting this shorter will impact performance. Do not use less than 30 seconds, that is not sensible.
-		private static int UpdateIntervalHisSec = 300;
-		private static int UpdateIntervalCurSec = 60;
+		private static int UpdateIntervalHisSec = 100; // 300;
+		private static int UpdateIntervalCurSec = 60; // 60;
 
 		// This limits the period searched for historic data on start-up.
 		// It's useful to have this to prevent large historic queries.
@@ -116,7 +116,7 @@ namespace DataFeederApp
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
 			// Use "$Root" for all points in the system, or customise to a specific group
-			var MyGroup = AdvConnection.FindObject("$Root"); // This group id could be used to monitor a subgroup of points
+			var MyGroup = AdvConnection.FindObject("SA.Plant.Energy.Electricity Pricing.Price"); // This group id could be used to monitor a subgroup of points
 			await AddAllPointsInGroup(MyGroup.Id, AdvConnection);
 			// For a single point test, use this.
 			//Feeder.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);

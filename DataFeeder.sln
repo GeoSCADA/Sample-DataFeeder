@@ -25,6 +25,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataFeederPi", "DataFeederP
 		{49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1} = {49C3157D-7EE3-47BD-BBF5-E0D28FBEB2F1}
 	EndProjectSection
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "DataFeederSparkplug", "DataFeederSparkplug\DataFeederSparkplug.csproj", "{3B6E190B-5E1C-4C81-AB1E-5B5AC1126E38}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -51,6 +53,10 @@ Global
 		{EA3B00B0-C86D-497C-9C24-A3B7C3A2FA64}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{EA3B00B0-C86D-497C-9C24-A3B7C3A2FA64}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{EA3B00B0-C86D-497C-9C24-A3B7C3A2FA64}.Release|Any CPU.Build.0 = Release|Any CPU
+		{3B6E190B-5E1C-4C81-AB1E-5B5AC1126E38}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{3B6E190B-5E1C-4C81-AB1E-5B5AC1126E38}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{3B6E190B-5E1C-4C81-AB1E-5B5AC1126E38}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{3B6E190B-5E1C-4C81-AB1E-5B5AC1126E38}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
