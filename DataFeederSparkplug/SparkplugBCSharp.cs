@@ -3,6 +3,7 @@
 #pragma warning disable 1591, 0612, 3021
 #region Designer generated code
 
+using System;
 using pb = global::Google.Protobuf;
 using pbc = global::Google.Protobuf.Collections;
 using pbr = global::Google.Protobuf.Reflection;
@@ -4715,9 +4716,14 @@ namespace Org.Eclipse.Tahu.Protobuf
                     }
 
                 }
-                #endregion
 
-            }
+				public static implicit operator ulong(Metric v)
+				{
+					throw new NotImplementedException();
+				}
+				#endregion
+
+			}
 
         }
         #endregion
