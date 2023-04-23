@@ -16,7 +16,7 @@ suit your requirements or that of your clients. It is perhaps not the
 most optimized, efficient or elegant code but we hope that its simplicity 
 will encourage engagement with Geo SCADA explore the new ideas.
 
-For a guide to implementing, running and customizing this sample, please see the PDF in this folder.
+*For a guide to implementing, running and customizing this sample, please see the PDF in this folder.*
 
 API Documentation is a help file installed by Geo SCADA. Find this on the Start menu in the EcoStruxure Geo SCADA group. It is called 'Client API Guide'.
 

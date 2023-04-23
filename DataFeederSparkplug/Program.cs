@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Threading.Tasks;
+using System.Linq;
 using System.Collections.Generic;
 using ClearScada.Client; // Find ClearSCADA.Client.dll in the Program Files\Schneider Electric\ClearSCADA folder
 using ClearScada.Client.Advanced;
@@ -44,6 +45,9 @@ namespace DataFeederApp
 		// Setting this shorter will impact performance. Do not use less than 30 seconds, that is not sensible.
 		public int UpdateIntervalHisSec = 300;
 		public int UpdateIntervalCurSec = 60;
+		// When a point is added, queue a data update to catch up history or get current value
+		// i.e. don't wait until the first data change to read data.
+		public bool CatchUpDataOnStart = true;
 
 		// This limits the period searched for historic data on start-up.
 		// It's useful to have this to prevent large historic queries.
@@ -80,6 +84,11 @@ namespace DataFeederApp
 		// Metric names will be created from point Full Names. To remove levels before sending, set this parameter
 		// For example, when set to 1 with ExportGroup = "Demo Items.Historic Demo", the "Demo Items." name will be removed
 		public int ExportGroupLevelTrim = 1;
+
+		// List of string filters on the Geo SCADA ClassName of points/objects to be exported
+		// New points for export will have their class name compared with this list
+		// A default set of filters is found in 
+		public List<string> ObjectClassFilter = new List<string>();
 
 		// Set the host's ID here so we can know it's STATE
 		// You need to configure your host's ID here
@@ -186,6 +195,9 @@ namespace DataFeederApp
 			else
 			{
 				// Save current settings for a user to edit.
+				// These are the defaults for this filter.
+				var DefaultFilter = new List<string> { "analog", "algmanual", "digital", "binary", "accumulator" };
+				Settings.ObjectClassFilter.AddRange( DefaultFilter);
 				string SetString = JsonConvert.SerializeObject(Settings, Formatting.Indented);
 				StreamWriter UpdateSetFile = new StreamWriter( FileBaseName);
 				UpdateSetFile.WriteLine(SetString);
@@ -375,8 +387,8 @@ namespace DataFeederApp
 
 			// Set up connection, read rate and the callback function/action for data processing
 			if (!Feeder.Connect(AdvConnection,
-					   true, // Must be true for Sparkplug
-					   true,
+					   true, // Update config on start, must be true for Sparkplug
+					   Settings.CatchUpDataOnStart, // Read/catch up data on start
 					   Settings.UpdateIntervalHisSec,
 					   Settings.UpdateIntervalCurSec,
 					   Settings.MaxDataAgeDays,
@@ -456,6 +468,48 @@ namespace DataFeederApp
 					}
 				}
 			}
+		}
+
+		/// <summary>
+		/// Callback used to filter new points being added to configuration.
+		/// Also used to filter points added to monitored list on startup.
+		/// In this example case we filter newly configured points to allow analog and digital (not string, time points).
+		/// Also remove template points.
+		/// </summary>
+		/// <param name="NewObject">Of the point (or accumulator)</param>
+		/// <returns>True to start watching this point</returns>
+		public static bool FilterNewPoint(ObjectDetails NewObject)
+		{
+			if (NewObject.TemplateId == -1) 
+			{
+				bool found = false;
+				foreach (var PartName in Settings.ObjectClassFilter)
+				{
+					if (NewObject.ClassName.ToLower().Contains( PartName.ToLower() ) ) 
+					{
+						found = true;
+						break;
+					}
+				}
+				if (found)
+				{
+					if (Settings.ExportGroup == "$Root")
+					{
+						return true;
+					}
+					if (NewObject.FullName.StartsWith(Settings.ExportGroup + "."))
+					{
+						return true;
+					}
+				}
+				return false;
+			}
+			else
+			{
+				//Console.WriteLine("Ignore: " + NewObject.FullName);
+				return false;
+			}
+			return false;
 		}
 
 		// Two functions to read/write the state of how far we exported data
@@ -1124,40 +1178,6 @@ namespace DataFeederApp
 			FeederContinue = false;
 		}
 
-		/// <summary>
-		/// Callback used to filter new points being added to configuration.
-		/// Also used to filter points added to monitored list on startup.
-		/// In this example case we filter newly configured points to allow analog and digital (not string, time points).
-		/// Also remove template points.
-		/// </summary>
-		/// <param name="NewObject">Of the point (or accumulator)</param>
-		/// <returns>True to start watching this point</returns>
-		public static bool FilterNewPoint(ObjectDetails NewObject)
-		{
-			if (NewObject.TemplateId == -1 &&
-				(NewObject.ClassName.ToLower().Contains("analog") ||
-				NewObject.ClassName.ToLower().Contains("algmanual") ||
-				NewObject.ClassName.ToLower().Contains("digital") ||
-				NewObject.ClassName.ToLower().Contains("binary") ||
-				NewObject.ClassName.ToLower().Contains("accumulator")))
-			{
-				//Console.WriteLine("Add: " + NewObject.FullName);
-				if (Settings.ExportGroup == "$Root")
-				{
-					return true;
-				}
-				if (NewObject.FullName.StartsWith(Settings.ExportGroup + "."))
-				{
-					return true;
-				}
-			}
-			else
-			{
-				//Console.WriteLine("Ignore: " + NewObject.FullName);
-				return false;
-			}
-			return false;
-		}
 	}
 
 	// Data structure of exported data
