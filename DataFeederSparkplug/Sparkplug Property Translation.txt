@@ -1,0 +1,7 @@
+engUnits	CSparkplugBPointAnalog	Units
+FullScale	CSparkplugBPointAnalog	FullScale
+ZeroScale	CSparkplugBPointAnalog	ZeroScale
+State0Desc	CSparkplugBPointDigital	State0Desc
+State1Desc	CSparkplugBPointDigital	State1Desc
+GISLocation.Longitude	CSparkplugBPoint	CGISLocationSrcStatic.Longitude
+GISLocation.Latitude	CSparkplugBPoint	CGISLocationSrcStatic.Latitude

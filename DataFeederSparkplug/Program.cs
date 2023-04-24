@@ -160,6 +160,9 @@ namespace DataFeederApp
 		// Sparkplug Data Message - buffers data changes until full, then gets sent
 		private static Payload DataMessage = new Payload();
 
+		// Logging setup with NLog - got from NuGet - match same version as Geo SCADA
+		//private static readonly NLog.Logger Logger = NLog.LogManager.GetCurrentClassLogger();
+
 		/// <summary>
 		/// Sparkplug Server program for Geo SCADA data subscription.
 		/// Command line parameters are a Username and Password.
@@ -176,6 +179,8 @@ namespace DataFeederApp
 		/// <returns></returns>
 		async static Task Main(string[] args)
 		{
+			Logger.Info("Startup");
+
 			// Start by reading settings, or saving them if there are none
 			if (File.Exists(FileBaseName) )
 			{
@@ -502,12 +507,6 @@ namespace DataFeederApp
 						return true;
 					}
 				}
-				return false;
-			}
-			else
-			{
-				//Console.WriteLine("Ignore: " + NewObject.FullName);
-				return false;
 			}
 			return false;
 		}
@@ -1048,9 +1047,21 @@ namespace DataFeederApp
 			// e.g. GPS locations, analogue range, digital states etc.
 			// Note that this would increase start time and database load during start, 
 			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set (but it is required for Sparkplug).
+
+			// This function could be restructured to be more table-driven.
+
 			// Get Point properties, these will depend on type
-			object[] PointProperties = { "", 0.0, 0.0, "", 0.0, 0.0, 0.0 };
-			PointProperties = AdvConnection.GetObjectFields(PointName, new string[] { "TypeName", "FullScale", "ZeroScale", "Units", "BitCount", "GISLocation.Latitude", "GISLocation.Longitude" });
+			object[] PointProperties = { "", 0.0, 0.0, "", 0.0, 0.0, 0.0, "", "" };
+			PointProperties = AdvConnection.GetObjectFields(PointName, 
+				new string[] {	"TypeName",				// 0
+								"FullScale",			// 1
+								"ZeroScale",			// 2
+								"Units",				// 3
+								"BitCount",				// 4
+								"GISLocation.Latitude", // 5
+								"GISLocation.Longitude",// 6
+								"State0Desc",			// 7
+								"State1Desc" });		// 8
 			var ConfigUpdate = new ConfigChange();
 			try
 			{
@@ -1075,8 +1086,10 @@ namespace DataFeederApp
 					ConfigUpdate.BitCount = Convert.ToInt32((PointProperties[4]) ?? 0);
 					if (ConfigUpdate.BitCount == 1)
 					{
-						// We can't force the Geo SCADA Driver to create a 2 or 3 bit digital?
+						// We can't force the Geo SCADA Driver to create a 2 or 3 bit digital
 						ConfigUpdate.Datatype = 11; // Boolean
+						ConfigUpdate.State0Desc = (string)(PointProperties[7] ?? ""); ;
+						ConfigUpdate.State1Desc = (string)(PointProperties[8] ?? ""); ;
 					}
 					else
 					{
@@ -1157,7 +1170,23 @@ namespace DataFeederApp
 				PSValueLongitude.DoubleValue = ConfigUpdate.Latitude;
 				PSValues.Add(PSValueLongitude);
 			}
-			// TODO - Digital state names
+			// Digital state names
+			if ((ConfigUpdate.State0Desc ?? "") != "")
+			{
+				PSKeys.Add("State0Desc");
+				var PSValueState0Desc = new Payload.Types.PropertyValue();
+				PSValueState0Desc.Type = 12; //String
+				PSValueState0Desc.StringValue = ConfigUpdate.State0Desc;
+				PSValues.Add(PSValueState0Desc);
+			}
+			if ((ConfigUpdate.State1Desc ?? "") != "")
+			{
+				PSKeys.Add("State1Desc");
+				var PSValueState1Desc = new Payload.Types.PropertyValue();
+				PSValueState1Desc.Type = 12; //String
+				PSValueState1Desc.StringValue = ConfigUpdate.State1Desc;
+				PSValues.Add(PSValueState1Desc);
+			}
 
 			// Add property set to birth metric
 			if (PSKeys.Count > 0)
@@ -1206,6 +1235,8 @@ namespace DataFeederApp
 		public int BitCount;
 		public Double Latitude;
 		public Double Longitude;
+		public string State0Desc;
+		public string State1Desc;
 		public uint Datatype; // The Sparkplug type number
 	}
 
