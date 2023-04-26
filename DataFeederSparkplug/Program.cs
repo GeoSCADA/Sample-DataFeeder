@@ -179,7 +179,7 @@ namespace DataFeederApp
 		/// <returns></returns>
 		async static Task Main(string[] args)
 		{
-			Logger.Info("Startup");
+			//Logger.Info("Startup");
 
 			// Start by reading settings, or saving them if there are none
 			if (File.Exists(FileBaseName) )
