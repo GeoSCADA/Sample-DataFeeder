@@ -3,19 +3,22 @@ using System.Text;
 using System.Security;
 using System.Security.Cryptography;
 using System.IO;
+using NLog;
 
 namespace DataFeederSparkplug
 {
 	class UserCredStore
 	{
+		private static readonly NLog.Logger Logger = NLog.LogManager.GetLogger("Sparkplug");
+
 		// user name entropy combined with this constant
 		private static byte[] additionalEntropy = new byte[] { 0x45, 0xF3, 0x10, 0xD3 };
 
-		public static bool FileReadCredentials(string CredFile, out string User, out SecureString Password)
+		public static bool FileReadCredentials(string CredFile, out string User, out string Password)
 		{
 			string CredentialsString = "";
 			User = "";
-			Password = new SecureString();
+			Password = "";
 			try
 			{
 				StreamReader CredFileReader = new StreamReader(CredFile);
@@ -24,17 +27,15 @@ namespace DataFeederSparkplug
 			}
 			catch (Exception e)
 			{
-				Console.WriteLine("Unable to read credentials file. " + e.Message);
+				Logger.Error("Unable to read credentials file. " + e.Message);
 				return false;
 			}
 			var Credentials = CredentialsString.Split(',');
 			if (Credentials.Length == 2)
 			{
-				Console.WriteLine("Read credentials from file: " + CredFile);
+				Logger.Info("Read credentials from file: " + CredFile);
 				return DecryptUserCreds(Credentials[0], Credentials[1], out User, out Password);
 			}
-			User = "";
-			Password = new SecureString();
 			return false;
 		}
 
@@ -50,7 +51,7 @@ namespace DataFeederSparkplug
 			}
 			catch (Exception e)
 			{
-				Console.WriteLine("Unable to write credentials file: " + e.Message);
+				Logger.Error("Unable to write credentials file: " + e.Message);
 				return false;
 			}
 			return true;
@@ -68,10 +69,8 @@ namespace DataFeederSparkplug
 			return true;
 		}
 
-		private static bool DecryptUserCreds(string EncryptedName, string EncryptedPassword, out string UserName, out SecureString password)
+		private static bool DecryptUserCreds(string EncryptedName, string EncryptedPassword, out string UserName, out string password)
 		{
-			password = new System.Security.SecureString();
-
 			byte[] userEncBytes = StringToByteArray(EncryptedName);
 			byte[] passEncBytes = StringToByteArray(EncryptedPassword);
 
@@ -80,11 +79,7 @@ namespace DataFeederSparkplug
 
 			// Decrypt password with additional entropy of the encoded user name
 			byte[] passDecBytes = ProtectedData.Unprotect(passEncBytes, userEncBytes, DataProtectionScope.LocalMachine);
-			string tpassword = Encoding.UTF8.GetString(passDecBytes);
-			foreach (var c in tpassword)
-			{
-				password.AppendChar(c);
-			}
+			password = Encoding.UTF8.GetString(passDecBytes);
 			return true;
 		}
 
