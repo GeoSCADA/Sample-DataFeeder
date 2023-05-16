@@ -1169,9 +1169,9 @@ namespace DataFeederApp
 			// We use the Geo SCADA row Id as the unique Sparkplug Alias
 			Out.Alias = (ulong)ConfigUpdate.PointId;
 			Out.Datatype = ConfigUpdate.Datatype;
-			// The next line is temporary - remove when using Geo SCADA 2022 May 2023 Update or after.
-			// It just puts a day old timestamp on zero data which will be processed even though IsNull is true.
-			Out.Timestamp = (ulong)DateTimeOffset.UtcNow.Subtract(TimeSpan.FromDays(1)).ToUnixTimeMilliseconds();
+			// The next line is temporary - you can optionally remove it when using Geo SCADA 2022 May 2023 Update or after.
+			// It just puts an X day old timestamp on zero data which will be processed even though IsNull is true.
+			Out.Timestamp = (ulong)DateTimeOffset.UtcNow.Subtract(TimeSpan.FromDays(Settings.MaxDataAgeDays)).ToUnixTimeMilliseconds();
 			Out.IsNull = true; // We are not sending any data in the Birth message
 
 			// Create/add metric properties
