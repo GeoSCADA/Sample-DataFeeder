@@ -1,25 +1,37 @@
-﻿using System;
+﻿// This is a Windows Service program. You can run/test it without installing as a service.
+// To install, run CMD as Admin, go to the compiled output folder and enter: 
+//  %windir%\Microsoft.Net\Framework64\v4.0.30319\installutil DataFeederSparkplug.exe
+// (Note: if you have run the program without installing as a service, installation may be
+//  blocked because the event log Source already exists. First go to the Event Viewer and
+//  right-click DataFeederLog in apps & services logs, then Clear it.)
+// You could use WIX to create an installer msi which does this.
+// The service optionally takes a command parameter - the filename of the setup file.
+using System;
 using System.Threading.Tasks;
-using System.Linq;
 using System.Collections.Generic;
 using ClearScada.Client; // Find ClearSCADA.Client.dll in the Program Files\Schneider Electric\ClearSCADA folder
 using ClearScada.Client.Advanced;
 using System.IO;
-using Newtonsoft.Json; // Bring in with nuget
-using FeederEngine;
-using System.Collections.Concurrent;
-using uPLibrary.Networking.M2Mqtt; // Bring in with nuget
-using Google.Protobuf;
-using Org.Eclipse.Tahu.Protobuf;
 using System.Security;
+using System.Diagnostics;
+using System.ServiceProcess;
+using System.Timers;
+using System.Collections.Concurrent;
+// Bring in with nuget
+using Newtonsoft.Json; 
+using uPLibrary.Networking.M2Mqtt;
+using Google.Protobuf;
+// From this solution
+using FeederEngine;
+using Org.Eclipse.Tahu.Protobuf;
 
 // Test and demo app for the FeederEngine and PointInfo classes (added from the DataFeeder Project)
 // This app writes output data as a Sparkplug Server to an MQTT server
 // It can easily be modified to change settings for the output.
 
-// This uses no MQTT server login or encryption, you are recommended to implement connection security
+// This uses no MQTT server encryption, you are recommended to implement connection security
 
-namespace DataFeederApp
+namespace DataFeederSparkplug
 {
 	class ProgramSettings
 	{
@@ -92,6 +104,7 @@ namespace DataFeederApp
 
 		// Set the host's ID here so we can know it's STATE
 		// You need to configure your host's ID here
+		// Right-click your Geo SCADA Broker and select View Status to see it
 		public string SCADAHostId = "GeoSCADAExpertA123456A0";
 
 		// Allow an option to ignore the server state and publish anyway
@@ -104,14 +117,23 @@ namespace DataFeederApp
 		// This is a test and development option - set to true if you only want to send Birth messages
 		// for example it could cause the receiving system to create points before any data is sent.
 		public bool SendBirthMessagesOnly = false;
+
+		// These credential variables are only used on a first run, then they are deleted from the JSON file
+		// To set and encrypt credentials, enter these to the JSON file, run the service,
+		// then check that the credentials CSV files are created, then remove these from the JSON file.
+		public string GSUser = "";
+		public string GSPassword = "";
+		public string MQTTUser = "";
+		public string MQTTPassword = "";
 	}
 
-	class Program
+	public partial class DataFeederSparkplug : ServiceBase
 	{
 		// Data file location for settings, output of date/time file of export progress, Sparkplug bdSeq. 
 		// If you want to run another instance of this on the same PC, this file path needs to be different.
+		// You can supply an alternative to this filename as a parameter to the Service executable.
 		public static string FileBaseName = @"c:\ProgramData\Schneider Electric\SpDataFeeder\Settings.json";
-		// Credentials files
+		// Credentials files - these are encrypted and saved from the initial ones in the settings file, see above.
 		public static string GSCredentialsFile = Path.GetDirectoryName(FileBaseName) + "\\" + "Credentials.csv";
 		public static string MQTTCredentialsFile = Path.GetDirectoryName(FileBaseName) + "\\" + "MQTTCredentials.csv";
 
@@ -171,39 +193,65 @@ namespace DataFeederApp
 		// Logging setup with NLog - got from NuGet - match same version as Geo SCADA
 		private static readonly NLog.Logger Logger = NLog.LogManager.GetLogger("Sparkplug");
 
-		/// <summary>
-		/// Sparkplug Server program for Geo SCADA data subscription.
-		/// Command line parameters are a Username and Password for Geo SCADA and optional user/pass for the MQTT Broker.
-		/// If they are not passed in then a file is read for encrypted credentials.
-		/// Run this with parameters once to write the Username and Password into the file, 
-		/// then clear the parameters for future runs.
-		/// 
-		/// The same approach is taken for settings. Default settings are written to a JSON file 
-		/// on first run. Edit this file for further runs.
-		/// 
-		/// File location is: c:\ProgramData\Schneider Electric\SpDataFeeder\
-		/// </summary>
-		/// <param name="args">[0] Geo SCADA User, [1] Geo SCADA Password, [2] MQTT User, [3] MQTT Password</param>
-		/// <returns></returns>
-		async static Task Main(string[] args)
+
+		internal void TestStartupAndStop(string[] args)
 		{
+			this.OnStart(args);
+			Console.ReadLine();
+			this.OnStop();
+		}
+		private int eventId = 1;
+		public DataFeederSparkplug()
+		{
+			InitializeComponent();
+			if (!Environment.UserInteractive)
+			{
+				eventLog1 = this.EventLog;
+			}
+		}
+
+		// Globals used by OnStart, OnTimer
+		Timer timer;
+		// Stats during the data feed:
+		DateTimeOffset StartTime = DateTimeOffset.UtcNow;
+		DateTimeOffset FlushUpdateFileTime = DateTimeOffset.UtcNow;
+		double ProcTime = 0;
+		int LongestQueue = 0;
+		int LastQueue = 0;
+
+		protected override void OnStart(string[] args)
+		{
+			if (args.Length >= 1)
+			{
+				if (!Environment.UserInteractive)
+				{
+					eventLog1.WriteEntry("Filename Argument: " + args[0], EventLogEntryType.Information, eventId++);
+				}
+				// Argument is the location of the configuration file. Different feeders should have different folder paths.
+				FileBaseName = args[0];
+			}
+
+			// Set up logging with NLOG
 			var config = new NLog.Config.LoggingConfiguration();
-			var logfile = new NLog.Targets.FileTarget("logfile") 
-			{ 
+			var logfile = new NLog.Targets.FileTarget("logfile")
+			{
 				FileName = Path.GetDirectoryName(FileBaseName) + "\\Log\\" + "SpDataFeeder.log",
 				MaxArchiveFiles = 10,
 				ArchiveNumbering = NLog.Targets.ArchiveNumberingMode.Sequence,
 				ArchiveAboveSize = 20000000
 			};
 			var logconsole = new NLog.Targets.ConsoleTarget("logconsole");
-			config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logconsole, "Sparkplug");
+			if (Environment.UserInteractive)
+			{
+				config.AddRule(NLog.LogLevel.Debug, NLog.LogLevel.Fatal, logconsole, "Sparkplug");
+			}
 			config.AddRule(NLog.LogLevel.Info, NLog.LogLevel.Fatal, logfile, "Sparkplug");
 			NLog.LogManager.Configuration = config;
 
 			Logger.Info("Startup");
 
 			// Start by reading settings, or saving them if there are none
-			if (File.Exists(FileBaseName) )
+			if (File.Exists(FileBaseName))
 			{
 				try
 				{
@@ -212,11 +260,56 @@ namespace DataFeederApp
 					Settings = JsonConvert.DeserializeObject<ProgramSettings>(SettingsText);
 					UpdateSetFile.Close();
 					Logger.Info("Read settings from file: " + FileBaseName + "\n" + SettingsText);
+					if (!Environment.UserInteractive)
+					{
+						eventLog1.WriteEntry("Read settings from file: " + FileBaseName + "\n" + SettingsText, EventLogEntryType.Information, eventId++);
+					}
 				}
 				catch
 				{
 					Logger.Error("Unable to read settings file.");
+					if (!Environment.UserInteractive)
+					{
+						eventLog1.WriteEntry("Unable to read settings file.", EventLogEntryType.Information, eventId++);
+					}
 					return;
+				}
+				// Good practice means storing credentials with reversible encryption, not adding them to code or using command parameters.
+				// This implementation allows a first use in the settings file, which it then deletes and stores encrypted in a file.
+				// So you can run once with this data and then run subsequent times without.
+				bool updateSettingsFile = false;
+				if (Settings.GSUser != "")
+				{
+					// Write Geo SCADA Credentials
+					if (!UserCredStore.FileWriteCredentials(GSCredentialsFile, Settings.GSUser, Settings.GSPassword))
+					{
+						Logger.Error("Cannot write Geo SCADA credentials.");
+						return;
+					}
+					updateSettingsFile = true;
+				}
+				if (Settings.MQTTUser != "")
+				{
+					// Write MQTT Credentials
+					if (!UserCredStore.FileWriteCredentials(MQTTCredentialsFile, Settings.MQTTUser, Settings.MQTTPassword))
+					{
+						Logger.Error("Cannot write MQTT credentials.");
+						return;
+					}
+					updateSettingsFile = true;
+				}
+				if (updateSettingsFile)
+				{
+					// Write settings back out - without credentials
+					Settings.GSUser = "";
+					Settings.GSPassword = "";
+					Settings.MQTTUser = "";
+					Settings.MQTTPassword = "";
+					string SetString = JsonConvert.SerializeObject(Settings, Formatting.Indented);
+					StreamWriter UpdateSetFile = new StreamWriter(FileBaseName);
+					UpdateSetFile.WriteLine(SetString);
+					UpdateSetFile.Close();
+					Logger.Info("Wrote default settings file without credentials.");
 				}
 			}
 			else
@@ -224,37 +317,12 @@ namespace DataFeederApp
 				// Save current settings for a user to edit.
 				// These are the defaults for this filter.
 				var DefaultFilter = new List<string> { "analog", "algmanual", "digital", "binary", "accumulator" };
-				Settings.ObjectClassFilter.AddRange( DefaultFilter);
+				Settings.ObjectClassFilter.AddRange(DefaultFilter);
 				string SetString = JsonConvert.SerializeObject(Settings, Formatting.Indented);
-				StreamWriter UpdateSetFile = new StreamWriter( FileBaseName);
+				StreamWriter UpdateSetFile = new StreamWriter(FileBaseName);
 				UpdateSetFile.WriteLine(SetString);
 				UpdateSetFile.Close();
-				Logger.Info("Wrote settings file");
-			}
-
-
-			// Good practice means storing credentials with reversible encryption, not adding them to code or using command parameters.
-			// This implementation allows a first use in command line parameters, which it then stores encrypted in a file.
-			// So you can run once with parameters and then run subsequent times without.
-
-			// If we have command line arguments, write Username and Passwords out in locally encrypted files
-			if (args.Length >= 2 ) 
-			{
-				// Write Geo SCADA Credentials
-				if (!DataFeederSparkplug.UserCredStore.FileWriteCredentials(GSCredentialsFile, args[0], args[1]))
-				{
-					Logger.Error("Cannot write Geo SCADA credentials.");
-					return;
-				}
-			}
-			if (args.Length >= 4)
-			{
-				// Write MQTT Credentials
-				if (!DataFeederSparkplug.UserCredStore.FileWriteCredentials(MQTTCredentialsFile, args[2], args[3]))
-				{
-					Logger.Error("Cannot write MQTT credentials.");
-					return;
-				}
+				Logger.Info("Wrote default settings file");
 			}
 
 			// For writing data, we store/maintain a store of metrics in Sparkplug Payload format
@@ -266,120 +334,147 @@ namespace DataFeederApp
 			UpdateTimeList = ReadUpdateTimeList(FileBaseName);
 
 			// Stats during the data feed:
-			long UpdateCount = 0;
-			DateTimeOffset StartTime = DateTimeOffset.UtcNow;
-			DateTimeOffset FlushUpdateFileTime = DateTimeOffset.UtcNow;
-			double ProcTime = 0;
-			int LongestQueue = 0;
-			int LastQueue = 0;
+			UpdateCount = 0;
+			StartTime = DateTimeOffset.UtcNow;
+			FlushUpdateFileTime = DateTimeOffset.UtcNow;
+			ProcTime = 0;
+			LongestQueue = 0;
+			LastQueue = 0;
 
-			// Main Loop
-			do
+			// Set up a timer that triggers every second.
+			timer = new Timer();
+			timer.Interval = 1000; // 1 second
+			timer.AutoReset = false;
+			timer.Elapsed += new ElapsedEventHandler(this.OnTimer);
+			timer.Start();
+		}
+
+
+		public void OnTimer(object sender, ElapsedEventArgs args)
+		{
+			if (!GeoSCADAConnectionState)
 			{
-				if (!GeoSCADAConnectionState)
+				// Attempt to make Geo SCADA Connection every 30 seconds - you could customise this
+				if ((DateTimeOffset.UtcNow - GeoSCADALastConnectionTry).TotalSeconds > 30)
 				{
-					// Attempt to make Geo SCADA Connection every 30 seconds - you could customise this
-					if ((DateTimeOffset.UtcNow - GeoSCADALastConnectionTry).TotalSeconds > 30)
+					FeederContinue = true; // Set to false by a Geo SCADA shutdown event/callback
+					GeoSCADAConnectionState = ConnectToGeoSCADA();
+					GeoSCADALastConnectionTry = DateTimeOffset.UtcNow;
+					if (!GeoSCADAConnectionState)
 					{
-						FeederContinue = true; // Set to false by a Geo SCADA shutdown event/callback
-						GeoSCADAConnectionState = ConnectToGeoSCADA();
-						GeoSCADALastConnectionTry = DateTimeOffset.UtcNow;
-						if (!GeoSCADAConnectionState)
-						{
-							// Failed, so flip the connection for next time
-							GeoSCADABackupServerActive = !GeoSCADABackupServerActive;
-						}
+						// Failed, so flip the connection for next time
+						GeoSCADABackupServerActive = !GeoSCADABackupServerActive;
 					}
 				}
-				else
+			}
+			else
+			{
+				// Check time and cause processing/export
+				DateTimeOffset ProcessStartTime = DateTimeOffset.UtcNow;
+
+				UpdateCount += Feeder.ProcessUpdates(); // Keep calling to pull data out. It returns after one second of process time. Adjust as needed.
+
+				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
+
+				// Flush UpdateTimeList file every minute, saving the progress of data received
+				// [This could be synced partially with sending of data to Sparkplug]
+				// [If Sparkplug is down and we still have data, you could persist data to memory in case of a shutdown]
+				// {Also only write this if we're sending Data messages, not if only sending Birth messages}
+				if ((FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow) && !Settings.SendBirthMessagesOnly)
 				{
-					// Check time and cause processing/export
-					DateTimeOffset ProcessStartTime = DateTimeOffset.UtcNow;
-
-					UpdateCount += Feeder.ProcessUpdates(); // Keep calling to pull data out. It returns after one second of process time. Adjust as needed.
-
-					ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
-
-					// Flush UpdateTimeList file every minute, saving the progress of data received
-					// [This could be synced partially with sending of data to Sparkplug]
-					// [If Sparkplug is down and we still have data, you could persist data to memory in case of a shutdown]
-					// {Also only write this if we're sending Data messages, not if only sending Birth messages}
-					if ((FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow) && !Settings.SendBirthMessagesOnly)
+					Logger.Info("Flush UpdateTime File - start...");
+					if (!WriteUpdateTimeList(FileBaseName, UpdateTimeList))
 					{
-						Logger.Info("Flush UpdateTime File - start...");
-						if (! WriteUpdateTimeList(FileBaseName, UpdateTimeList) )
-						{
-							Logger.Error("Error writing the update time list, stopping.");
-							break;
-						}
-						FlushUpdateFileTime = DateTimeOffset.UtcNow;
-						Logger.Info("End");
-
-						// Also flush gathered metric data regularly
-						FlushMetric();
+						Logger.Error("Error writing the update time list, stopping.");
+						return;
 					}
+					FlushUpdateFileTime = DateTimeOffset.UtcNow;
+					Logger.Info("End");
 
-					// If the FeederContinue flag is cleared then there's a Geo SCADA stop or connection fail
-					if (!FeederContinue && GeoSCADAConnectionState)
-					{
-						Logger.Info("Stop and Disconnect.");
-						GeoSCADAConnectionState = false;
-						try
-						{
-							AdvConnection.LogOff();
-							AdvConnection.Dispose();
-						}
-						catch
-						{
-							Logger.Error("Exception disconnecting from Geo SCADA.");
-						}
-					}
+					// Also flush gathered metric data regularly
+					FlushMetric();
 				}
-				await Task.Delay(1000); // You must pause to allow the database to serve other tasks. 
-										// Consider the impact on the server, particularly if it is Main or Standby. 
-										// A dedicated Permanent Standby could be used for this export.
 
-				// Output stats
-				Logger.Info($"Tot Updates: {UpdateCount} (Avg {(int)(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)}/s, GS Proc: {ProcTime}mS, Proc Q: {Feeder.ProcessQueueCount()}, Birth Q: {BirthQueue.Count}, Data Q: {DataQueue.Count}, Tot Pubs: {BatchCount}");
-
-				// Check if we are falling behind - and recommend longer scan interval
-				int PC = Feeder.ProcessQueueCount();
-				if (PC > LongestQueue)
+				// If the FeederContinue flag is cleared then there's a Geo SCADA stop or connection fail
+				if (!FeederContinue && GeoSCADAConnectionState)
 				{
-					// Gone up, and previous count wasn't low
-					if (LastQueue > 100)
+					Logger.Info("Stop and Disconnect.");
+					GeoSCADAConnectionState = false;
+					try
 					{
-						Logger.Warn("*** Queue size increasing, queue not being processed quickly, consider increasing update time interval.");
+						AdvConnection.LogOff();
+						AdvConnection.Dispose();
 					}
-					LongestQueue = PC;
-				}
-				LastQueue = PC;
-
-				// Attempt MQTT Connection
-				if (!SparkplugConnectionState)
-				{
-					// Make MQTT Connection every 30 seconds - you could customise this
-					if ((DateTimeOffset.UtcNow - SparkplugLastConnectionTry).TotalSeconds > 30)
+					catch
 					{
-						SparkplugConnectionState = ConnectSparkplug();
-						SparkplugLastConnectionTry = DateTimeOffset.UtcNow;
+						Logger.Error("Exception disconnecting from Geo SCADA.");
 					}
 				}
-				else
-				// If connected, send queued Sparkplug data to MQTT Server
-				// Do this the loop after we first connect so if it's unsuccessful we don't send data before.
+			}
+
+			// Output stats
+			Logger.Info($"Tot Updates: {UpdateCount} (Avg {(int)(UpdateCount / (DateTimeOffset.UtcNow - StartTime).TotalSeconds)}/s, GS Proc: {ProcTime}mS, Proc Q: {Feeder.ProcessQueueCount()}, Birth Q: {BirthQueue.Count}, Data Q: {DataQueue.Count}, Tot Pubs: {BatchCount}");
+
+			// Check if we are falling behind - and recommend longer scan interval
+			int PC = Feeder.ProcessQueueCount();
+			if (PC > LongestQueue)
+			{
+				// Gone up, and previous count wasn't low
+				if (LastQueue > 100)
 				{
-					SendToMQTTServer();
+					Logger.Warn("*** Queue size increasing, queue not being processed quickly, consider increasing update time interval.");
 				}
-			} while (true);
+				LongestQueue = PC;
+			}
+			LastQueue = PC;
+
+			// Attempt MQTT Connection
+			if (!SparkplugConnectionState)
+			{
+				// Make MQTT Connection every 30 seconds - you could customise this
+				if ((DateTimeOffset.UtcNow - SparkplugLastConnectionTry).TotalSeconds > 30)
+				{
+					SparkplugConnectionState = ConnectSparkplug();
+					SparkplugLastConnectionTry = DateTimeOffset.UtcNow;
+				}
+			}
+			else
+			// If connected, send queued Sparkplug data to MQTT Server
+			// Do this the loop after we first connect so if it's unsuccessful we don't send data before.
+			{
+				SendToMQTTServer();
+			}
+
+			// Reinstate timer
+			timer.Start();
+		}
+
+
+		protected override void OnStop()
+		{
+			Logger.Info("OnStop called.");
+			timer.Stop();
 
 			// Finish by writing time list
 			WriteUpdateTimeList(FileBaseName, UpdateTimeList);
-			// Flush remaining data.
+			// Flush remaining data - doing this twice to attempt to write data to MQTT.
 			FlushMetric();
-			SendToMQTTServer();
+			if (SparkplugConnectionState)
+			{
+				SendToMQTTServer();
+			}
+			if (BirthQueue.Count > 0 || DataQueue.Count > 0)
+			{
+				Logger.Info($"Queued {BirthQueue.Count} Birth and {DataQueue.Count} Data Messages will be lost.");
+			}
+			else
+			{
+				Logger.Info("All data sucessfully sent to the MQTT Broker.");
+			}
 			// Close MQTT Connection
 			Client.Disconnect();
+
+			Logger.Info("OnStop end.");
 		}
 
 		public static bool ConnectToGeoSCADA()
@@ -396,7 +491,7 @@ namespace DataFeederApp
 			string User = "";
 			string PasswordStr = "";
 			var Password = new SecureString();
-			if (DataFeederSparkplug.UserCredStore.FileReadCredentials(GSCredentialsFile, out User, out PasswordStr))
+			if (UserCredStore.FileReadCredentials(GSCredentialsFile, out User, out PasswordStr))
 			{
 				foreach (var c in PasswordStr)
 				{
@@ -524,12 +619,12 @@ namespace DataFeederApp
 		/// <returns>True to start watching this point</returns>
 		public static bool FilterNewPoint(ObjectDetails NewObject)
 		{
-			if (NewObject.TemplateId == -1) 
+			if (NewObject.TemplateId == -1)
 			{
 				bool found = false;
 				foreach (var PartName in Settings.ObjectClassFilter)
 				{
-					if (NewObject.ClassName.ToLower().Contains( PartName.ToLower() ) ) 
+					if (NewObject.ClassName.ToLower().Contains(PartName.ToLower()))
 					{
 						found = true;
 						break;
@@ -633,7 +728,7 @@ namespace DataFeederApp
 			// If we can't read credentials, assume they are blank
 			string User = "";
 			string PasswordStr = "";
-			DataFeederSparkplug.UserCredStore.FileReadCredentials(MQTTCredentialsFile, out User, out PasswordStr);
+			UserCredStore.FileReadCredentials(MQTTCredentialsFile, out User, out PasswordStr);
 
 			try
 			{
@@ -721,7 +816,7 @@ namespace DataFeederApp
 			{
 				// Increment for next time we run or create a new Birth message, so when next read for death, one was added
 				StreamWriter SpUpdateFile = new StreamWriter(Path.GetDirectoryName(FileBase) + "\\" + "SparkplugState.csv");
-				SpUpdateFile.WriteLine(bdSeq+1);
+				SpUpdateFile.WriteLine(bdSeq + 1);
 				SpUpdateFile.Close();
 			}
 			return bdSeq;
@@ -757,7 +852,7 @@ namespace DataFeederApp
 			if ((Settings.SparkplugVersion == 2) &&
 					(tokens.Length == 2) &&
 					(tokens[0] == "STATE") &&
-					(tokens[1] == Settings.SCADAHostId) )
+					(tokens[1] == Settings.SCADAHostId))
 			{
 				string m = System.Text.Encoding.UTF8.GetString(e.Message);
 				Logger.Info("Received: " + m);
@@ -771,7 +866,14 @@ namespace DataFeederApp
 				}
 				else
 				{
-					Logger.Info("Server Online");
+					if (Settings.SparkplugIgnoreServerState)
+					{
+						Logger.Info("Setup parameter SparkplugIgnoreServerState means we are ignoring server OFFLINE.");
+					}
+					else
+					{
+						Logger.Info("Server Online");
+					}
 				}
 				return;
 			}
@@ -782,7 +884,7 @@ namespace DataFeederApp
 					(tokens.Length == 4) &&
 					(tokens[0] == "spBv1.0") &&
 					(tokens[1] == "STATE") &&
-					(tokens[2] == Settings.SCADAHostId) )
+					(tokens[2] == Settings.SCADAHostId))
 			{
 				string m = System.Text.Encoding.UTF8.GetString(e.Message);
 				Logger.Info("Received: " + m);
@@ -810,11 +912,11 @@ namespace DataFeederApp
 			}
 
 			// Incoming node control
-			if (	tokens.Length == 4 &&
-				(tokens[0] == "spBv1.0") && 
-				(tokens[1] == Settings.SpGroupId) && 
-				( (tokens[2] == "NCMD" ) || (tokens[2] == "DCMD") )&& 
-				(tokens[3] == Settings.SpNode) )
+			if (tokens.Length == 4 &&
+				(tokens[0] == "spBv1.0") &&
+				(tokens[1] == Settings.SpGroupId) &&
+				((tokens[2] == "NCMD") || (tokens[2] == "DCMD")) &&
+				(tokens[3] == Settings.SpNode))
 			{
 				Payload inboundPayload; // Parse SpB Protobuf into object structure
 				try
@@ -982,7 +1084,7 @@ namespace DataFeederApp
 
 			// Add BD Sequence (same as Death number)
 			var bdSeqMetric = new Payload.Types.Metric();
-			bdSeqMetric.Timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(); 
+			bdSeqMetric.Timestamp = (ulong)DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 			bdSeqMetric.Name = "bdSeq";
 			bdSeqMetric.Datatype = 8; // INT64
 			bdSeqMetric.LongValue = ReadSparkplugState(FileBaseName, false); // This should increment from previous connections
@@ -1021,7 +1123,7 @@ namespace DataFeederApp
 		{
 			// Remove old entry for this metric, if it exists
 			// This is not efficient for a large system - consider an alternative implementation
-			foreach( var Metric in BirthMessage.Metrics)
+			foreach (var Metric in BirthMessage.Metrics)
 			{
 				if (Metric.Name == Out.Name)
 				{
@@ -1100,8 +1202,8 @@ namespace DataFeederApp
 
 			// Get Point properties, these will depend on type
 			object[] PointProperties = { "", 0.0, 0.0, "", 0.0, 0.0, 0.0, "", "" };
-			PointProperties = AdvConnection.GetObjectFields(PointName, 
-				new string[] {	"TypeName",				// 0
+			PointProperties = AdvConnection.GetObjectFields(PointName,
+				new string[] {  "TypeName",				// 0
 								"FullScale",			// 1
 								"ZeroScale",			// 2
 								"Units",				// 3
@@ -1109,7 +1211,7 @@ namespace DataFeederApp
 								"GISLocation.Latitude", // 5
 								"GISLocation.Longitude",// 6
 								"State0Desc",			// 7
-								"State1Desc" });		// 8
+								"State1Desc" });        // 8
 			var ConfigUpdate = new ConfigChange();
 			try
 			{
@@ -1120,8 +1222,8 @@ namespace DataFeederApp
 				ConfigUpdate.ClassName = (string)PointProperties[0];
 				ConfigUpdate.Datatype = 0;
 				// Imprecise way to pick floating point types, can be improved by looking up type names
-				if (PointProperties[0].ToString().Contains("Analog") || 
-					PointProperties[0].ToString().Contains("Alg") || 
+				if (PointProperties[0].ToString().Contains("Analog") ||
+					PointProperties[0].ToString().Contains("Alg") ||
 					PointProperties[0].ToString().Contains("Counter"))
 				{
 					ConfigUpdate.Datatype = 10; // Double
@@ -1164,7 +1266,7 @@ namespace DataFeederApp
 				SparkplugName += GeoSCADANameParts[i].Replace('/', '\\') + "/";
 			}
 			// Trim the extra '/'
-			Out.Name = SparkplugName.Substring(0, SparkplugName.Length-1);
+			Out.Name = SparkplugName.Substring(0, SparkplugName.Length - 1);
 
 			// We use the Geo SCADA row Id as the unique Sparkplug Alias
 			Out.Alias = (ulong)ConfigUpdate.PointId;
@@ -1259,7 +1361,6 @@ namespace DataFeederApp
 		}
 
 	}
-
 	// Data structure of exported data
 	public class DataVQT
 	{
