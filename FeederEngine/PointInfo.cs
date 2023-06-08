@@ -130,6 +130,12 @@ namespace FeederEngine
 			AdvConnection.RemoveTags(new int[] { TagId });
 		}
 
+		// Reset database connection
+		public static void ResetDatabaseConnection()
+		{
+			ServerConnect = false;
+		}
+
 		// Read historic or real-time data
 		public int ReadHistoric(IServer AdvConnection, CustomTagUpdate Update)
 		{

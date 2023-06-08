@@ -106,6 +106,12 @@ namespace FeederEngine
 			AdvConnection.StateChanged += DBStateChangeEvent;
 			AdvConnection.AdviseStateChange();
 
+			// Clear the point dictionary
+			PointDictionary.Clear();
+
+			// Reset the PointInfo Connection
+			PointInfo.ResetDatabaseConnection();
+
 			return true;
 		}
 
