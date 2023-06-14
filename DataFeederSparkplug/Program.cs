@@ -104,6 +104,11 @@ namespace DataFeederSparkplug
 		// A default set of filters is found in Line 319 approx: var DefaultFilter = new List<string> ...
 		public List<string> ObjectClassFilter = new List<string>();
 
+		// Specify a boolean database field which, when true, will enable data export for the point/accumulator
+		// Typically you would leave this setting blank if all points in the group ExportGroup are to be exported
+		// (Filtered by the type of object). It's expected that this will be a metadata Boolean field.
+		public string ExportIfThisFieldIsTrue = "";
+
 		// Configuration properties to be sent in the birth certificate
 		// This is the filename in the folder C:\ProgramData\Schneider Electric\SpDataFeeder
 		// You can use this file in the Geo SCADA configuration for the EoN Node in the destination database.
@@ -693,9 +698,12 @@ namespace DataFeederSparkplug
 		/// <returns>True to start watching this point</returns>
 		public static bool FilterNewPoint(ObjectDetails NewObject)
 		{
+			bool found = false;
+
+			// Exclude Template items
 			if (NewObject.TemplateId == -1)
 			{
-				bool found = false;
+				// Include items matching ClassName filter
 				foreach (var PartName in Settings.ObjectClassFilter)
 				{
 					if (NewObject.ClassName.ToLower().Contains(PartName.ToLower()))
@@ -706,17 +714,36 @@ namespace DataFeederSparkplug
 				}
 				if (found)
 				{
+					found = false;
+					// Include items in the correct group heirarchy
 					if (Settings.ExportGroup == "$Root")
 					{
-						return true;
+						found = true;
 					}
 					if (NewObject.FullName.StartsWith(Settings.ExportGroup + "."))
 					{
-						return true;
+						found = true;
+					}
+					// Include all if the settings does not specify ExportIfThisFieldIsTrue
+					if (Settings.ExportIfThisFieldIsTrue != "")
+					{
+						// Get the property value for ExportIfThisFieldIsTrue
+						object[] ExportBooleanProperty = new object[1];
+						try
+						{
+							ExportBooleanProperty = AdvConnection.GetObjectFields(NewObject.FullName, 
+														new string[] { Settings.ExportIfThisFieldIsTrue });
+							found = (bool)ExportBooleanProperty[0];
+						}
+						catch (Exception e)
+						{
+							Logger.Error($"Can't read filter boolean field for: {NewObject.FullName}, {e.Message}");
+							found = false;
+						}
 					}
 				}
 			}
-			return false;
+			return found;
 		}
 
 		// Two functions to read/write the state of how far we exported data
