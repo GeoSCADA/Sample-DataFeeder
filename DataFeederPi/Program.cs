@@ -183,7 +183,7 @@ namespace DataFeederApp
 			// This is a bulk test - all points. Either for all using ObjectId.Root, or a specified group id such as MyGroup.Id
 			// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
 			// Use "$Root" for all points in the system, or customise to a specific group
-			var MyGroup = AdvConnection.FindObject("$Root"); // This group id could be used to monitor a subgroup of points
+			var MyGroup = AdvConnection.FindObject("Example Projects"); // This group id could be used to monitor a subgroup of points
 			await AddAllPointsInGroup(MyGroup.Id, AdvConnection);
 			// For a single point test, use this.
 			//Feeder.AddSubscription( "Test.A1b", DateTimeOffset.MinValue);
