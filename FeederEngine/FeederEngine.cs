@@ -246,11 +246,13 @@ namespace FeederEngine
 					}
 					else
 					{
+						bool Found = false;
 						// Find point - will need to look at the full list
 						foreach (var Info in PointDictionary)
 						{
 							if (Info.Value.PointId == objupdate.ObjectId)
 							{
+								Found = true;
 								// We have the point which changed
 								switch (objupdate.UpdateType)
 								{
@@ -262,12 +264,16 @@ namespace FeederEngine
 										}
 										Info.Value.Dispose();
 										var modpoint = AdvConnection.LookupObject(new ObjectId(objupdate.ObjectId));
-										if (modpoint != null)
+										if (modpoint != null && FilterNewPoint(modpoint))
 										{
 											PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, modpoint.FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, modified.LastChange, AdvConnection, ProcessNewData));
 											NextKey++;
 											Console.WriteLine("Replaced point: " + modpoint.FullName + ", from: " + modified.LastChange.ToString());
 											ProcessNewConfig( "Modified", objupdate.ObjectId, modpoint.FullName);
+										}
+										else
+										{
+											Console.WriteLine("Removed point: " + modpoint.FullName + ", from: " + modified.LastChange.ToString());
 										}
 										break;
 									case ObjectUpdateType.Deleted:
@@ -290,6 +296,20 @@ namespace FeederEngine
 										break;
 								}
 								break;
+							}
+						}
+						if (!Found)
+						{
+							// Point is not in our list, but it's a change, so it was filtered out before
+							// Same as the code run for all new points - use filter to include user's desired points, 
+							// otherwise everything new would be added.
+							var newpoint = AdvConnection.LookupObject(new ObjectId(objupdate.ObjectId));
+							if (newpoint != null && FilterNewPoint(newpoint))
+							{
+								PointDictionary.TryAdd(NextKey, new PointInfo(NextKey, newpoint.FullName, UpdateIntervalHisSec, UpdateIntervalCurSec, DateTimeOffset.MinValue, AdvConnection, ProcessNewData));
+								NextKey++;
+								Console.WriteLine("Added modified point: " + newpoint.FullName);
+								ProcessNewConfig("Created", objupdate.ObjectId, newpoint.FullName);
 							}
 						}
 					}
