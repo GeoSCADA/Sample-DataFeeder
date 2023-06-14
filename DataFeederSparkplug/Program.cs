@@ -17,6 +17,8 @@ using System.Diagnostics;
 using System.ServiceProcess;
 using System.Timers;
 using System.Collections.Concurrent;
+using System.Linq; // For Dict.Keys.ToArray()
+
 // Bring in with nuget
 using Newtonsoft.Json; 
 using uPLibrary.Networking.M2Mqtt;
@@ -91,7 +93,7 @@ namespace DataFeederSparkplug
 		// Either for all using $Root, or a specified group name such as "MyGroup" or "East.Plant A"
 		// Gentle reminder - only watch and get what you need. Any extra is a waste of performance.
 		// This example "Demo Items.Historic Demo" will export all point data in this group and any subgroups
-		public string ExportGroup = "Example Projects.Water and Wastewater";
+		public string ExportGroup = "Example Projects";
 
 		// Metric names will be created from point Full Names. To remove levels before sending, set this parameter
 		// For example, when set to 1 with ExportGroup = "Demo Items.Historic Demo", the "Demo Items." name will be removed
@@ -99,8 +101,16 @@ namespace DataFeederSparkplug
 
 		// List of string filters on the Geo SCADA ClassName of points/objects to be exported
 		// New points for export will have their class name compared with this list
-		// A default set of filters is found in 
+		// A default set of filters is found in Line 319 approx: var DefaultFilter = new List<string> ...
 		public List<string> ObjectClassFilter = new List<string>();
+
+		// Configuration properties to be sent in the birth certificate
+		// This is the filename in the folder C:\ProgramData\Schneider Electric\SpDataFeeder
+		// You can use this file in the Geo SCADA configuration for the EoN Node in the destination database.
+		// If you add properties to this file they will be read from Geo SCADA configuration in the source
+		//  database and can be automatically configured in the destination.
+		// A default set of properties will be created and added to this file if is does not exist.
+		public string ConfigPropertyFile = "";
 
 		// Set the host's ID here so we can know it's STATE
 		// You need to configure your host's ID here
@@ -193,6 +203,11 @@ namespace DataFeederSparkplug
 		// Logging setup with NLog - got from NuGet - match same version as Geo SCADA
 		private static readonly NLog.Logger Logger = NLog.LogManager.GetLogger("Sparkplug");
 
+		// Property Translation List
+		// This is read from a file in Geo SCADA Sparkplug Driver format:
+		//  <Sparkplug Property Name> <tab> <Geo SCADA Table Name> <tab> <Geo SCADA Column Name>
+		// This program indexes it by <Geo SCADA Table Name> <tab> <Geo SCADA Column Name>
+		private static Dictionary<string, string> PropertyTranslations = new Dictionary<string, string>();
 
 		internal void TestStartupAndStop(string[] args)
 		{
@@ -298,6 +313,13 @@ namespace DataFeederSparkplug
 					}
 					updateSettingsFile = true;
 				}
+				// Adding new property
+				if (Settings.ConfigPropertyFile == "")
+				{
+					Settings.ConfigPropertyFile = "PropertyTranslationTable.txt";
+					updateSettingsFile = true;
+				}
+				// Write out the settings file if anything changed
 				if (updateSettingsFile)
 				{
 					// Write settings back out - without credentials
@@ -323,6 +345,58 @@ namespace DataFeederSparkplug
 				UpdateSetFile.WriteLine(SetString);
 				UpdateSetFile.Close();
 				Logger.Info("Wrote default settings file");
+			}
+
+			// Read the Property Translation Table data so that exports can know the fields to be written to the Birth Messages
+			string ConfigPropertyFileName = Path.GetDirectoryName(FileBaseName) + "\\" + Settings.ConfigPropertyFile;
+			string PropertyTranslation = "";
+			try
+			{
+				StreamReader UpdateSetFile = new StreamReader(ConfigPropertyFileName);
+				PropertyTranslation = UpdateSetFile.ReadToEnd();
+				UpdateSetFile.Close();
+				Logger.Info("Read property translation settings from file OK: " + ConfigPropertyFileName);
+			}
+			catch
+			{
+				Logger.Error("Unable to read property translation settings from file: " + ConfigPropertyFileName);
+				// Try to write out a default file
+				PropertyTranslation = "Units	CSparkplugBPointAnalog	Units\n" +
+									"FullScale CSparkplugBPointAnalog FullScale\n" +
+									"ZeroScale   CSparkplugBPointAnalog ZeroScale\n" +
+									"BitCount CSparkplugBPointDigital BitCount\n" +
+									"State0Desc CSparkplugBPointDigital State0Desc\n" +
+									"State1Desc  CSparkplugBPointDigital State1Desc\n" +
+									// Note that Geo SCADA Sparkplug Driver ignores these target fields currently
+									"GISLocation.Longitude CSparkplugBPoint    CGISLocationSrcStatic.Longitude\n" +
+									"GISLocation.Latitude CSparkplugBPoint    CGISLocationSrcStatic.Latitude\n";
+				StreamWriter UpdatePTTFile = new StreamWriter(ConfigPropertyFileName);
+				UpdatePTTFile.WriteLine(PropertyTranslation);
+				UpdatePTTFile.Close();
+				Logger.Info("Wrote default Property Translation Table file");
+			}
+			// Store Property Translations in a dictionary
+			foreach( string entry in PropertyTranslation.Split('\n'))
+			{
+				string[] elements = entry.Trim().Split('\t');
+				if (elements.Length == 3 && elements[0].Length > 1 && elements[1].Length > 1 && elements[2].Length > 1)
+				{
+					// Ignoring the table name - we retrieve regardless of type and ignore any null fields
+					PropertyTranslations.Add(elements[2], elements[0]);
+					Logger.Info("Adding Property Translation Table entry: " + entry);
+				}
+				else
+				{
+					if (entry != "")
+					{
+						Logger.Info("Property Translation Table file entry invalid: " + entry);
+					}
+				}
+			}
+			// Always add TypeName
+			if (!PropertyTranslations.ContainsKey("TypeName"))
+			{
+				PropertyTranslations.Add("TypeName", "TypeName");
 			}
 
 			// For writing data, we store/maintain a store of metrics in Sparkplug Payload format
@@ -1153,23 +1227,12 @@ namespace DataFeederSparkplug
 				EngineShutdown();
 				return;
 			}
-			var DataUpdate = new DataVQT
-			{
-				PointId = Id,
-				UpdateType = UpdateType,
-				PointName = PointName, // Not used by Sparkplug, we use the point id as the alias
-				Value = Value,
-				Timestamp = Timestamp, // For your application, periodically buffer this to use as the LastChange parameter on restarting.
-									   // This enables gap-free data historic data.
-				OPCQuality = ((int)(Quality) & 255),     // Not supported by Sparkplug
-				ExtendedQuality = ((int)(Quality) / 256) // Not supported by Sparkplug
-			};
 
 			var Out = new Payload.Types.Metric();
-			Out.Alias = (ulong)DataUpdate.PointId;
+			Out.Alias = (ulong)Id;
 			Out.Datatype = 10; // Double
-			Out.DoubleValue = DataUpdate.Value;
-			Out.Timestamp = (ulong)DataUpdate.Timestamp.ToUnixTimeMilliseconds();
+			Out.DoubleValue = Value;
+			Out.Timestamp = (ulong)Timestamp.ToUnixTimeMilliseconds();
 			Out.IsHistorical = false; // Always send as real-time values (DataUpdate.UpdateType == "His");
 
 			WriteMetric(Out);
@@ -1193,71 +1256,28 @@ namespace DataFeederSparkplug
 		/// <param name="PointName"></param>
 		public static void ProcessNewConfig(string UpdateType, int Id, string PointName)
 		{
-			// Could add further code to get point configuration fields and types to export, 
+			// Uses the PropertyTranslations to read properties and write them out to the Birth Certificate, 
 			// e.g. GPS locations, analogue range, digital states etc.
 			// Note that this would increase start time and database load during start, 
 			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set (but it is required for Sparkplug).
 
-			// This function could be restructured to be more table-driven.
+			// Get Point properties, these will depend on type, and any null values are ignored
+			object[] PointProperties = new object[PropertyTranslations.Count];
 
-			// Get Point properties, these will depend on type
-			object[] PointProperties = { "", 0.0, 0.0, "", 0.0, 0.0, 0.0, "", "" };
-			PointProperties = AdvConnection.GetObjectFields(PointName,
-				new string[] {  "TypeName",				// 0
-								"FullScale",			// 1
-								"ZeroScale",			// 2
-								"Units",				// 3
-								"BitCount",				// 4
-								"GISLocation.Latitude", // 5
-								"GISLocation.Longitude",// 6
-								"State0Desc",			// 7
-								"State1Desc" });        // 8
-			var ConfigUpdate = new ConfigChange();
 			try
 			{
-				ConfigUpdate.PointId = Id;
-				ConfigUpdate.UpdateType = UpdateType;
-				ConfigUpdate.PointName = PointName;
-				ConfigUpdate.Timestamp = DateTimeOffset.UtcNow;
-				ConfigUpdate.ClassName = (string)PointProperties[0];
-				ConfigUpdate.Datatype = 0;
-				// Imprecise way to pick floating point types, can be improved by looking up type names
-				if (PointProperties[0].ToString().Contains("Analog") ||
-					PointProperties[0].ToString().Contains("Alg") ||
-					PointProperties[0].ToString().Contains("Counter"))
-				{
-					ConfigUpdate.Datatype = 10; // Double
-					ConfigUpdate.Units = (string)(PointProperties[3] ?? "");
-					ConfigUpdate.FullScale = (double)(PointProperties[1] ?? (double)0);
-					ConfigUpdate.ZeroScale = (double)(PointProperties[2] ?? (double)0);
-				}
-				else
-				{
-					ConfigUpdate.BitCount = Convert.ToInt32((PointProperties[4]) ?? 0);
-					if (ConfigUpdate.BitCount == 1)
-					{
-						// We can't force the Geo SCADA Driver to create a 2 or 3 bit digital
-						ConfigUpdate.Datatype = 11; // Boolean
-						ConfigUpdate.State0Desc = (string)(PointProperties[7] ?? ""); ;
-						ConfigUpdate.State1Desc = (string)(PointProperties[8] ?? ""); ;
-					}
-					else
-					{
-						ConfigUpdate.Datatype = 6; // UInt16
-					}
-				}
-				ConfigUpdate.Latitude = (double)(PointProperties[5] ?? (double)0);
-				ConfigUpdate.Longitude = (double)(PointProperties[6] ?? (double)0);
+				PointProperties = AdvConnection.GetObjectFields(PointName, PropertyTranslations.Keys.ToArray());
 			}
 			catch (Exception e)
 			{
-				Logger.Error("Error reading properties for configuration: " + e.Message);
+				Logger.Error($"Can't read object fields for: {PointName}, {e.Message}");
+				return;
 			}
 
 			var Out = new Payload.Types.Metric();
 
 			// Filter out from the point name using ExportGroupLevelTrim
-			var GeoSCADANameParts = ConfigUpdate.PointName.Split('.');
+			var GeoSCADANameParts = PointName.Split('.');
 			var SparkplugName = "";
 			for (int i = Settings.ExportGroupLevelTrim; i < GeoSCADANameParts.Length; i++)
 			{
@@ -1269,8 +1289,8 @@ namespace DataFeederSparkplug
 			Out.Name = SparkplugName.Substring(0, SparkplugName.Length - 1);
 
 			// We use the Geo SCADA row Id as the unique Sparkplug Alias
-			Out.Alias = (ulong)ConfigUpdate.PointId;
-			Out.Datatype = ConfigUpdate.Datatype;
+			Out.Alias = (ulong)Id;
+
 			// The next line is temporary - you can optionally remove it when using Geo SCADA 2022 May 2023 Update or after.
 			// It just puts an X day old timestamp on zero data which will be processed even though IsNull is true.
 			Out.Timestamp = (ulong)DateTimeOffset.UtcNow.Subtract(TimeSpan.FromDays(Settings.MaxDataAgeDays)).ToUnixTimeMilliseconds();
@@ -1280,65 +1300,103 @@ namespace DataFeederSparkplug
 			var PSKeys = new List<string>();
 			var PSValues = new List<Payload.Types.PropertyValue>();
 
-			// Units
-			if ((ConfigUpdate.Units ?? "") != "")
+			// If BitCount is a property, use it to control point type
+			int index = 0;
+			byte BitCount = 0;
+			foreach (string FieldName in PropertyTranslations.Keys)
 			{
-				PSKeys.Add("Units");
-				var PSValueUnits = new Payload.Types.PropertyValue();
-				PSValueUnits.Type = 12; //String
-				PSValueUnits.StringValue = ConfigUpdate.Units;
-				PSValues.Add(PSValueUnits);
+				if (FieldName == "BitCount" && PointProperties[index] != null)
+				{
+					var PSType = PointProperties[index].GetType().ToString();
+					if (PSType == "System.Byte")
+					{
+						BitCount = (byte)PointProperties[index];
+						break;
+					}
+				}
+				index++;
 			}
-			// Scale
-			if (ConfigUpdate.FullScale != 0)
+			index = 0;
+			foreach (string FieldName in PropertyTranslations.Keys)
 			{
-				PSKeys.Add("FullScale");
-				var PSValueFullScale = new Payload.Types.PropertyValue();
-				PSValueFullScale.Type = 10; //Double
-				PSValueFullScale.DoubleValue = ConfigUpdate.FullScale;
-				PSValues.Add(PSValueFullScale);
-			}
-			if (ConfigUpdate.ZeroScale != 0)
-			{
-				PSKeys.Add("ZeroScale");
-				var PSValueZeroScale = new Payload.Types.PropertyValue();
-				PSValueZeroScale.Type = 10; //Double
-				PSValueZeroScale.DoubleValue = ConfigUpdate.ZeroScale;
-				PSValues.Add(PSValueZeroScale);
-			}
-			// Lat and Long
-			if (ConfigUpdate.Latitude != 0)
-			{
-				PSKeys.Add("Latitude");
-				var PSValueLatitude = new Payload.Types.PropertyValue();
-				PSValueLatitude.Type = 10; //Double
-				PSValueLatitude.DoubleValue = ConfigUpdate.Latitude;
-				PSValues.Add(PSValueLatitude);
-			}
-			if (ConfigUpdate.Longitude != 0)
-			{
-				PSKeys.Add("Longitude");
-				var PSValueLongitude = new Payload.Types.PropertyValue();
-				PSValueLongitude.Type = 10; //Double
-				PSValueLongitude.DoubleValue = ConfigUpdate.Latitude;
-				PSValues.Add(PSValueLongitude);
-			}
-			// Digital state names
-			if ((ConfigUpdate.State0Desc ?? "") != "")
-			{
-				PSKeys.Add("State0Desc");
-				var PSValueState0Desc = new Payload.Types.PropertyValue();
-				PSValueState0Desc.Type = 12; //String
-				PSValueState0Desc.StringValue = ConfigUpdate.State0Desc;
-				PSValues.Add(PSValueState0Desc);
-			}
-			if ((ConfigUpdate.State1Desc ?? "") != "")
-			{
-				PSKeys.Add("State1Desc");
-				var PSValueState1Desc = new Payload.Types.PropertyValue();
-				PSValueState1Desc.Type = 12; //String
-				PSValueState1Desc.StringValue = ConfigUpdate.State1Desc;
-				PSValues.Add(PSValueState1Desc);
+				// If this is the point type
+				if (FieldName == "TypeName")
+				{
+					string ClassName = (String)PointProperties[index];
+					// Imprecise way to pick floating point types, can be improved by looking up type names
+					if (ClassName.Contains("Analog") ||
+						ClassName.Contains("Alg") ||
+						ClassName.Contains("Counter"))
+					{
+						Out.Datatype = 10; // Double
+					}
+					else
+					{
+						// Digital types
+
+						// If BitCount is a property and it's 1, make this a boolean, otherwise it's going to be analog
+						if (BitCount == 1)
+						{
+							Out.Datatype = 11; // Boolean
+						}
+						else
+						{
+							Out.Datatype = 6; // UInt16
+						}
+					}
+				}
+				else
+				{
+					// Process other field values
+					if (PointProperties[index] != null)
+					{
+						var PSValue = new Payload.Types.PropertyValue();
+						var PSType = PointProperties[index].GetType().ToString();
+						switch (PSType)
+						{
+							case "System.String":
+								PSValue.Type = 12; // String
+								PSValue.StringValue = (String)PointProperties[index];
+								PSValues.Add(PSValue);
+								PSKeys.Add(FieldName);
+								break;
+							case "System.Double":
+							case "System.Float":
+								PSValue.Type = 10; // Double
+								PSValue.DoubleValue = (Double)PointProperties[index];
+								PSValues.Add(PSValue);
+								PSKeys.Add(FieldName);
+								break;
+							case "System.Int16":
+							case "System.UInt16":
+							case "System.Int32":
+							case "System.UInt32":
+							case "System.Int64":
+							case "System.UInt64":
+								PSValue.Type = 4; // Int64
+								PSValue.IntValue = (uint)PointProperties[index];
+								PSValues.Add(PSValue);
+								PSKeys.Add(FieldName);
+								break;
+							case "System.Byte":
+								PSValue.Type = 5; // UInt8
+								PSValue.IntValue = (byte)PointProperties[index];
+								PSValues.Add(PSValue);
+								PSKeys.Add(FieldName);
+								break;
+							case "System.Boolean":
+								PSValue.Type = 11; // Bool
+								PSValue.BooleanValue = (bool)PointProperties[index];
+								PSValues.Add(PSValue);
+								PSKeys.Add(FieldName);
+								break;
+							default:
+								Logger.Error($"Wrong fields type for Point: {PointName} Field: {FieldName} Type: {PSType}");
+								break;
+						}
+					}
+				}
+				index++;
 			}
 
 			// Add property set to birth metric
@@ -1360,36 +1418,6 @@ namespace DataFeederSparkplug
 			FeederContinue = false;
 		}
 
-	}
-	// Data structure of exported data
-	public class DataVQT
-	{
-		public int PointId;
-		public string UpdateType;
-		public string PointName;
-		public double Value;
-		public DateTimeOffset Timestamp;
-		public int OPCQuality;
-		public int ExtendedQuality;
-	}
-
-	// Data structure of configuration data
-	public class ConfigChange
-	{
-		public int PointId;
-		public string UpdateType;
-		public string PointName;
-		public DateTimeOffset Timestamp;
-		public string ClassName;
-		public Double FullScale;
-		public Double ZeroScale;
-		public string Units;
-		public int BitCount;
-		public Double Latitude;
-		public Double Longitude;
-		public string State0Desc;
-		public string State1Desc;
-		public uint Datatype; // The Sparkplug type number
 	}
 
 	// Online state structure for Sparkplug 3 online state
