@@ -1,6 +1,6 @@
 ﻿// This is a generic Geo SCADA Historic Data Feeder Service.
 // It can be customised by altering the settings below (See comment 'SPECIFIC TO' ) and
-// replace the file Export<Sparkplug or something else>.cs with your own private/public
+// replace the file Export<BigQuery or something else>.cs with your own private/public
 // methods, keeping to the public interface.
 //
 // This is a Windows Service program. You can run/test it without installing as a service.
@@ -69,7 +69,7 @@ namespace DataFeederService
 		// When the AddSubscription method is called with a Start Time, that time will be adjusted if the time period
 		// (from then to now) is greater than this maximum age. Therefore when this export is restarted after a time
 		// gap of more than this age, then data will be missing from the export.
-		public int MaxDataAgeDays = 1;
+		public int MaxDataAgeDays = 2;
 
 		// Specify the group containing points for export.
 		// Either for all using $Root, or a specified group name such as "MyGroup" or "East.Plant A"
@@ -77,10 +77,10 @@ namespace DataFeederService
 		// This example "Demo Items.Historic Demo" will export all point data in this group and any subgroups
 		public string ExportGroup = "Example Projects";
 
-		// Exported item/Metric names will be created from point Full Names. To remove levels before sending, set this parameter
+		// Exported item/point names will be created from point Full Names. To remove levels before sending, set this parameter
 		// For example, when set to 1 with ExportGroup = "Demo Items.Historic Demo", the "Demo Items." name will be removed
 		// To export full names set this to 0
-		public int ExportGroupLevelTrim = 1;
+		public int ExportGroupLevelTrim = 0;
 
 		// List of string filters on the Geo SCADA ClassName of points/objects to be exported
 		// New points for export will have their class name compared with this list
@@ -92,7 +92,7 @@ namespace DataFeederService
 		// (Filtered by the type of object). It's expected that this will be a metadata Boolean field.
 		public string ExportIfThisFieldIsTrue = "";
 
-		// Configuration properties to be sent in the birth/configuration messages
+		// Configuration properties to be sent in the configuration messages
 		// This is the filename in the folder C:\ProgramData\Schneider Electric\SpDataFeeder
 		// For Sparkplug, you can use this file in the Geo SCADA configuration for the EoN Node in the destination database.
 		//   If you add properties to this file they will be read from Geo SCADA configuration in the source
@@ -105,59 +105,34 @@ namespace DataFeederService
 		// then check that the credentials CSV files are created, then remove these from the JSON file.
 		public string GSUser = "";
 		public string GSPassword = "";
-		public string TargetUser = "";
-		public string TargetPassword = "";
 		// credentials are encrypted and stored in these files:
 		public string GSCredentialsFile = "";
-		public string TargetCredentialsFile = "";
 
 		// ************************************************************************************************************
-		// SPECIFIC TO SPARKPLUG
+		// SPECIFIC TO BIGQUERY
 		// ************************************************************************************************************
 		// Security
-		// The above TargetUser and TargetPassword strings are the MQTT Server user and password
+		public string GoogleCredentialFile = @"c:\ProgramData\Schneider Electric\SpDataFeeder\fair-splice-390013-87ac94ab9847.json";
 
 		// Connection parameters
-		public string MQTTServerName = "127.0.0.1"; // Mosquitto running locally, or "192.168.86.123";
-		public int MQTTServerPort = 1883;
-		public string MQTTClientName = "SpClient1";
-		// Backup server
-		public string MQTTBackupServerName = "127.0.0.1"; // Leave the same if no backup needed
+		public string ProjectID = "fair-splice-390013";
 
-		// Sparkplug Version 2 or 3 - affects how STATE works. Geo SCADA 2022 uses V2.
-		public int SparkplugVersion = 2;
+		// Data Set
+		public string DataSetId = "geoscadadatasetone";
 
-		// Sparkplug identification
-		// This is the Group ID
-		public string SpGroupId = "SCADA";
-		// This is the EoN Node ID
-		public string SpNode = "System1";
+		// Tables
+		public string HisDataTableId = "HisData";
+		public string ConfDataTableId = "ConfData";
 
-		// We are not using Devices in this implementation
-		// private static string SpDevice = "Device1"; // And the next level group name for this
-
-		// Set the host's ID here so we can know it's STATE
-		// You need to configure your host's ID here
-		// Right-click your Geo SCADA Broker and select View Status to see it
-		public string SCADAHostId = "GeoSCADAExpertA123456A0";
-
-		// Allow an option to ignore the server state and publish anyway
-		// Set to false to obey the Sparkplug standard
-		// You may need this to be 'true' when using Geo SCADA 2022 Initial or March 2023 Release Sparkplug Client Driver
-		// The fault should fixed in Geo SCADA 2022 May 2023 Release.
-		public bool SparkplugIgnoreServerState = false;
-
-		// An option for test use which will restrict sent messages to Birth messages only, no data
-		// This is a test and development option - set to true if you only want to send Birth messages
-		// for example it could cause the receiving system to create points before any data is sent.
-		public bool SendBirthMessagesOnly = false;
+		// Batch Size for record updates
+		public int BatchRecordCount = 100;
 
 		// ************************************************************************************************************
 	}
 
 	public partial class DataFeederService : ServiceBase
 	{
-		// Data file location for settings, output of date/time file of export progress, Sparkplug bdSeq etc. 
+		// Data file location for settings, output of date/time file of export progress, Sparkplug bdSeq. 
 		// If you want to run another instance of this on the same PC, this file path needs to be different.
 		// You can supply an alternative to this filename as a parameter to the Service executable.
 		public static string FileBaseName = @"c:\ProgramData\Schneider Electric\SpDataFeeder\Settings.json";
@@ -318,10 +293,15 @@ namespace DataFeederService
 					Settings.GSCredentialsFile = Path.GetDirectoryName(FileBaseName) + "\\" + "Credentials.csv";
 					updateSettingsFile = true;
 				}
-				if (Settings.TargetCredentialsFile == "")
+				if (Settings.GoogleCredentialFile == "")
 				{
-					Settings.TargetCredentialsFile = Path.GetDirectoryName(FileBaseName) + "\\" + ExportToTarget.ExportName + "Credentials.csv";
-					updateSettingsFile = true;
+					// Check it exists
+					Logger.Error("Settings have no google credentials file name.");
+					if (!Environment.UserInteractive)
+					{
+						eventLog1.WriteEntry("Settings have no google credentials file name.", EventLogEntryType.Information, eventId++);
+					}
+					return;
 				}
 				if (Settings.GSUser != "")
 				{
@@ -329,16 +309,6 @@ namespace DataFeederService
 					if (!UserCredStore.FileWriteCredentials(Settings.GSCredentialsFile, Settings.GSUser, Settings.GSPassword))
 					{
 						Logger.Error("Cannot write Geo SCADA credentials.");
-						return;
-					}
-					updateSettingsFile = true;
-				}
-				if (Settings.TargetUser != "")
-				{
-					// Write Target Credentials
-					if (!UserCredStore.FileWriteCredentials(Settings.TargetCredentialsFile, Settings.TargetUser, Settings.TargetPassword))
-					{
-						Logger.Error("Cannot write Target credentials.");
 						return;
 					}
 					updateSettingsFile = true;
@@ -355,8 +325,6 @@ namespace DataFeederService
 					// Write settings back out - without credentials
 					Settings.GSUser = "";
 					Settings.GSPassword = "";
-					Settings.TargetUser = "";
-					Settings.TargetPassword = "";
 					string SetString = JsonConvert.SerializeObject(Settings, Formatting.Indented);
 					StreamWriter UpdateSetFile = new StreamWriter(FileBaseName);
 					UpdateSetFile.WriteLine(SetString);
@@ -380,7 +348,7 @@ namespace DataFeederService
 			ExportToTarget.Settings = Settings;
 			ExportToTarget.PropertyTranslations = PropertyTranslations;
 
-			// Read the Property Translation Table data so that exports can know the fields to be written to the Birth Messages
+			// Read the Property Translation Table data so that exports can know the fields to be written to the Config Messages
 			string ConfigPropertyFileName = Settings.ConfigPropertyFile;
 			string PropertyTranslation = "";
 			try
@@ -394,15 +362,16 @@ namespace DataFeederService
 			{
 				Logger.Error("Unable to read property translation settings from file: " + ConfigPropertyFileName);
 				// Try to write out a default file (this may be inappropriate for your export target)
-				PropertyTranslation = "Units	CSparkplugBPointAnalog	Units\n" +
-									"FullScale CSparkplugBPointAnalog FullScale\n" +
-									"ZeroScale   CSparkplugBPointAnalog ZeroScale\n" +
-									"BitCount CSparkplugBPointDigital BitCount\n" +
-									"State0Desc CSparkplugBPointDigital State0Desc\n" +
-									"State1Desc  CSparkplugBPointDigital State1Desc\n" +
-									// Note that Geo SCADA Sparkplug Driver ignores these target fields currently
-									"GISLocation.Longitude CSparkplugBPoint    CGISLocationSrcStatic.Longitude\n" +
-									"GISLocation.Latitude CSparkplugBPoint    CGISLocationSrcStatic.Latitude\n";
+				// For BigQuery, the middle table name is ignored, but you do need three columns.
+				// List is TAB separated
+				PropertyTranslation = "Units\tCSparkplugBPointAnalog\tUnits\n" +
+									"FullScale\tCSparkplugBPointAnalog\tFullScale\n" +
+									"ZeroScale\tCSparkplugBPointAnalog\tZeroScale\n" +
+									"BitCount\tCSparkplugBPointDigital\tBitCount\n" +
+									"State0Desc\tCSparkplugBPointDigital\tState0Desc\n" +
+									"State1Desc\tCSparkplugBPointDigital\tState1Desc\n" +
+									"GISLocation.Longitude\tCSparkplugBPoint\tLongitude\n" +
+									"GISLocation.Latitude\tCSparkplugBPoint\tLatitude\n";
 				StreamWriter UpdatePTTFile = new StreamWriter(ConfigPropertyFileName);
 				UpdatePTTFile.WriteLine(PropertyTranslation);
 				UpdatePTTFile.Close();
@@ -481,10 +450,8 @@ namespace DataFeederService
 				ProcTime = (DateTimeOffset.UtcNow - ProcessStartTime).TotalMilliseconds;
 
 				// Flush UpdateTimeList file every minute, saving the progress of data received
-				// [This could be synced partially with sending of data to Sparkplug]
-				// [If Sparkplug is down and we still have data, you could persist data to memory in case of a shutdown]
-				// {Also only write this if we're sending Data messages, not if only sending Birth messages}
-				if ((FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow) && !Settings.SendBirthMessagesOnly)
+				// [If BigQuery is down and we still have data, you could persist data to memory in case of a shutdown]
+				if (FlushUpdateFileTime.AddSeconds(60) < DateTimeOffset.UtcNow)
 				{
 					Logger.Info("Flush UpdateTime File - start...");
 					if (!WriteUpdateTimeList(FileBaseName, UpdateTimeList))
@@ -495,7 +462,7 @@ namespace DataFeederService
 					FlushUpdateFileTime = DateTimeOffset.UtcNow;
 					Logger.Info("End");
 
-					// Also flush gathered metric data regularly
+					// Also flush gathered point data regularly
 					ExportToTarget.FlushPointData();
 				}
 
@@ -566,7 +533,7 @@ namespace DataFeederService
 			}
 			if (ExportToTarget.ConfigQueueCount > 0 || ExportToTarget.DataQueueCount > 0)
 			{
-				Logger.Info($"Queued {ExportToTarget.ConfigQueueCount} Birth and {ExportToTarget.DataQueueCount} Data Messages will be lost.");
+				Logger.Info($"Queued {ExportToTarget.ConfigQueueCount} Config and {ExportToTarget.DataQueueCount} Data Messages will be lost.");
 			}
 			else
 			{
@@ -845,10 +812,10 @@ namespace DataFeederService
 		/// <param name="PointName"></param>
 		public static void ProcessNewConfig(string UpdateType, int Id, string PointName)
 		{
-			// Uses the PropertyTranslations to read properties and write them out to the Birth Certificate, 
+			// Uses the PropertyTranslations to read properties and write them out to the Config rows, 
 			// e.g. GPS locations, analogue range, digital states etc.
 			// Note that this would increase start time and database load during start, 
-			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set (but it is required for Sparkplug).
+			//  if the Connect method has 'UpdateConfigurationOnStart' parameter set.
 
 			// Get Point properties, these will depend on type, and any null values are ignored
 			object[] PointProperties = new object[PropertyTranslations.Count];
