@@ -378,7 +378,6 @@ namespace DataFeederService
 			}
 			// Advise the export class
 			ExportToTarget.Settings = Settings;
-			ExportToTarget.PropertyTranslations = PropertyTranslations;
 
 			// Read the Property Translation Table data so that exports can know the fields to be written to the Birth Messages
 			string ConfigPropertyFileName = Settings.ConfigPropertyFile;
@@ -855,7 +854,7 @@ namespace DataFeederService
 
 			try
 			{
-				PointProperties = AdvConnection.GetObjectFields(PointName, PropertyTranslations.Keys.ToArray());
+				PointProperties = AdvConnection.GetObjectFields(PointName, PropertyTranslations.Values.ToArray());
 			}
 			catch (Exception e)
 			{
