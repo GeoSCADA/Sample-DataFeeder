@@ -170,8 +170,12 @@ namespace DataFeederService
 		// Property Translation List
 		// This is read from a file in Geo SCADA Sparkplug Driver format:
 		//  <Sparkplug Property Name> <tab> <Geo SCADA Table Name> <tab> <Geo SCADA Column Name>
-		// This program indexes it by <Geo SCADA Table Name> <tab> <Geo SCADA Column Name>
+		// This program indexes it by <BigQuery Column Name> -> <Geo SCADA Property Name>
 		private static Dictionary<string, string> PropertyTranslations = new Dictionary<string, string>();
+		// To create a BigQuery table for config we also need field types: <BigQuery Column Name> -> <Type Name>
+		private static Dictionary<string, string> PropertyTypes = new Dictionary<string, string>();
+		// And a list of tables for the fields: <BigQuery Column Name> -> <Table Name>
+		private static Dictionary<string, string> PropertyTables = new Dictionary<string, string>();
 
 		internal void TestStartupAndStop(string[] args)
 		{
@@ -346,7 +350,6 @@ namespace DataFeederService
 			}
 			// Advise the export class
 			ExportToTarget.Settings = Settings;
-			ExportToTarget.PropertyTranslations = PropertyTranslations;
 
 			// Read the Property Translation Table data so that exports can know the fields to be written to the Config Messages
 			string ConfigPropertyFileName = Settings.ConfigPropertyFile;
@@ -362,16 +365,19 @@ namespace DataFeederService
 			{
 				Logger.Error("Unable to read property translation settings from file: " + ConfigPropertyFileName);
 				// Try to write out a default file (this may be inappropriate for your export target)
-				// For BigQuery, the middle table name is ignored, but you do need three columns.
-				// List is TAB separated
-				PropertyTranslation = "Units\tCSparkplugBPointAnalog\tUnits\n" +
-									"FullScale\tCSparkplugBPointAnalog\tFullScale\n" +
-									"ZeroScale\tCSparkplugBPointAnalog\tZeroScale\n" +
-									"BitCount\tCSparkplugBPointDigital\tBitCount\n" +
-									"State0Desc\tCSparkplugBPointDigital\tState0Desc\n" +
-									"State1Desc\tCSparkplugBPointDigital\tState1Desc\n" +
-									"GISLocation.Longitude\tCSparkplugBPoint\tLongitude\n" +
-									"GISLocation.Latitude\tCSparkplugBPoint\tLatitude\n";
+				// For BigQuery, the middle table name used to get a type for that field name,
+				// and any points with that field existing will get read/transferred.
+				// If you refer to an aggregate (e.g. Longitude) you need to refer to the
+				// correct class with that aggregate attached (e.g. CDBObject).
+				// The list is TAB separated.
+				PropertyTranslation = "Units\tCPointAlgManual\tUnits\n" +
+									"FullScale\tCPointAlgManual\tFullScale\n" +
+									"ZeroScale\tCPointAlgManual\tZeroScale\n" +
+									"BitCount\tCPointDigitalManual\tBitCount\n" +
+									"State0Desc\tCPointDigitalManual\tState0Desc\n" +
+									"State1Desc\tCPointDigitalManual\tState1Desc\n" +
+									"GISLocation.Longitude\tCDBObject\tLongitude\n" +
+									"GISLocation.Latitude\tCDBObject\tLatitude\n";
 				StreamWriter UpdatePTTFile = new StreamWriter(ConfigPropertyFileName);
 				UpdatePTTFile.WriteLine(PropertyTranslation);
 				UpdatePTTFile.Close();
@@ -386,6 +392,8 @@ namespace DataFeederService
 					// Ignoring the table name - we retrieve regardless of type and ignore any null fields
 					PropertyTranslations.Add(elements[2], elements[0]);
 					Logger.Info("Adding Property Translation Table entry: " + entry);
+					// This adds tables names, used to get types for creating the BigQuery Table
+					PropertyTables.Add(elements[2], elements[1]);
 				}
 				else
 				{
@@ -399,9 +407,12 @@ namespace DataFeederService
 			if (!PropertyTranslations.ContainsKey("TypeName"))
 			{
 				PropertyTranslations.Add("TypeName", "TypeName");
+				PropertyTables.Add("TypeName", "CDBObject");
 			}
 			// Advise the export class
 			ExportToTarget.PropertyTranslations = PropertyTranslations;
+			// Field types set when we connect to Geo SCADA
+			ExportToTarget.PropertyTypes = PropertyTypes;
 
 			// Read file of last update times so we can recover missing data if the service was not running
 			UpdateTimeList = ReadUpdateTimeList(FileBaseName);
@@ -592,6 +603,16 @@ namespace DataFeederService
 			}
 			Logger.Info("Logged on.");
 
+			// Add type information to the configuration fields
+			foreach( var fieldname in PropertyTables.Keys)
+			{
+				string datatype = GetGeoSCADAFieldType(PropertyTables[fieldname], PropertyTranslations[fieldname], AdvConnection);
+				if (datatype != "")
+				{
+					PropertyTypes.Add(fieldname, datatype);
+				}
+			}
+
 			// Set up connection, read rate and the callback function/action for data processing
 			if (!Feeder.Connect(AdvConnection,
 					   true, // Update config on start, must be true for Sparkplug
@@ -616,6 +637,46 @@ namespace DataFeederService
 			Logger.Info("Total Points Watched: " + Feeder.SubscriptionCount().ToString());
 
 			return true;
+		}
+
+		// Return a string containing the type of the Geo SCADA field (Aggregate fields are <AggName>.<Field>)
+		private static string GetGeoSCADAFieldType( string TableName, string PropertyName, IServer AdvConnection)
+		{
+			var classmetadata = AdvConnection.GetClass(TableName);
+			foreach (var item in classmetadata.Properties)
+			{
+				if (item.Name == PropertyName)
+				{
+					return item.DataType.FullName;
+				}
+			}
+			// Not found, so search the parent
+			if (classmetadata.BaseClass != "")
+			{
+				string fieldtype = GetGeoSCADAFieldType(classmetadata.BaseClass, PropertyName, AdvConnection);
+				if (fieldtype != "")
+				{
+					return fieldtype;
+				}
+			}
+			// Search aggregates instead
+			foreach (var aggdata in classmetadata.Aggregates)
+			{
+				var aggclasses = aggdata.Classes; // AggregateDetails
+				foreach (var aggclass in aggclasses)
+				{
+					var aggmetadata = AdvConnection.GetClass(aggclass);
+					foreach (var aggitem in aggmetadata.Properties)
+					{
+						if (aggdata.Name + "." + aggitem.Name == PropertyName)
+						{
+							return aggitem.DataType.FullName;
+						}
+					}
+				}
+			}
+			// Not found
+			return "";
 		}
 
 		/// <summary>
@@ -822,7 +883,7 @@ namespace DataFeederService
 
 			try
 			{
-				PointProperties = AdvConnection.GetObjectFields(PointName, PropertyTranslations.Keys.ToArray());
+				PointProperties = AdvConnection.GetObjectFields(PointName, PropertyTranslations.Values.ToArray());
 			}
 			catch (Exception e)
 			{

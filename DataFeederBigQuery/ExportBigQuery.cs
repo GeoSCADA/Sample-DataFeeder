@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.Concurrent;
+using System.Linq; // For Dict.Keys.ToArray()
 
 // Bring in with nuget
 using Google.Cloud.BigQuery.V2;
@@ -30,8 +31,10 @@ namespace DataFeederService
 		// Count of the messages we have sent out
 		public static int ExportCount = 0;
 
-		// A reference to the property trans array
+		// A reference to the property trans array - target column name vs source column
 		public static Dictionary<string, string> PropertyTranslations;
+		// A reference to the table trans array - target column name vs source table
+		public static Dictionary<string, string> PropertyTypes;
 
 		// EDIT THIS TO STATE THE EXPORT NAME - it's used to name the credentials file if applicable
 		public const String ExportName = "BigQuery";
@@ -130,6 +133,8 @@ namespace DataFeederService
 			{
 				if (ConfigQueue.TryPeek(out List<ConfigChange> configs))
 				{
+					var PropNames = PropertyTranslations.Keys.ToArray();
+
 					// Has table been referenced, if not try to create it
 					if (ConfigTableRef == null)
 					{
@@ -140,20 +145,53 @@ namespace DataFeederService
 								{"UpdateType", BigQueryDbType.String, BigQueryFieldMode.Nullable, "Type of configuration update" },
 								{"PointName", BigQueryDbType.String, BigQueryFieldMode.Required, "Point Full Name" },
 								{"Timestamp", BigQueryDbType.DateTime, BigQueryFieldMode.Required, "Time of Configuration Record" },
-								{"TypeName", BigQueryDbType.String, BigQueryFieldMode.Required, "Type Name" },
-								{"FullScale", BigQueryDbType.Float64, BigQueryFieldMode.Nullable, "Full Scale" },
-								{"ZeroScale", BigQueryDbType.Float64, BigQueryFieldMode.Nullable, "Zero Scale" },
-								{"Units", BigQueryDbType.String, BigQueryFieldMode.Nullable, "Units" },
-								{"BitCount", BigQueryDbType.Int64, BigQueryFieldMode.Nullable, "Bit Count" },
-								{"Latitude", BigQueryDbType.Float64, BigQueryFieldMode.Nullable, "Latitude" },
-								{"Longitude", BigQueryDbType.Float64, BigQueryFieldMode.Nullable, "Longitude" },
-								{"State0Desc", BigQueryDbType.String, BigQueryFieldMode.Nullable, "State 0 Description" },
-								{"State1Desc", BigQueryDbType.String, BigQueryFieldMode.Nullable, "State 1 Description" },
 							}.Build();
 
+						foreach( string PropName in PropertyTypes.Keys)
+						{
+							var field = new Google.Apis.Bigquery.v2.Data.TableFieldSchema();
+							field.Name = PropName;
+							switch( PropertyTypes[ PropName])
+							{
+								case "System.String":
+									field.Type = "STRING";
+									break;
+								case "System.Double":
+								case "System.Float":
+								case "System.Single":
+									field.Type = "FLOAT";
+									break;
+								case "System.Int16":
+								case "System.UInt16":
+								case "System.Int32":
+								case "System.UInt32":
+								case "System.Int64":
+								case "System.UInt64":
+									field.Type = "INTEGER";
+									break;
+								case "System.Byte":
+									field.Type = "INTEGER";
+									break;
+								case "System.DateTime":
+								case "System.DateTimeOffset":
+									field.Type = "DATETIME";
+									break;
+								case "System.Boolean":
+									field.Type = "BOOLEAN";
+									break;
+								default:
+									field.Type = "STRING";
+									break;
+							}
+							field.Mode = "NULLABLE";
+							field.Description = PropertyTranslations[PropName];
+							schema.Fields.Add(field);
+						}
 						DefineBigQueryTable(ref ConfigTableRef, Settings.ConfDataTableId, schema);
 						// Returns False if not created, but also blanks the table ref
 					}
+
+					
 					if (ConfigTableRef != null)
 					{
 						List<BigQueryInsertRow> rows = new List<BigQueryInsertRow>();
@@ -165,16 +203,48 @@ namespace DataFeederService
 								{ "UpdateType", config.UpdateType },
 								{ "PointName", config.PointName },
 								{ "Timestamp", config.Timestamp.ToUniversalTime().ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff") },
-								{ "TypeName", config.TypeName },
-								{ "FullScale", config.FullScale },
-								{ "ZeroScale", config.ZeroScale },
-								{ "Units", config.Units },
-								{ "BitCount", config.BitCount },
-								{ "Latitude", config.Latitude },
-								{ "Longitude", config.Longitude },
-								{ "State0Desc", config.State0Desc },
-								{ "State1Desc", config.State1Desc },
 							};
+							for (int i = 0; i < PropNames.Length; i++)
+							{
+								if (config.Properties[i] != null)
+								{
+									var PSType = config.Properties[i].GetType().ToString();
+									object PSValue;
+									switch (PSType)
+									{
+										case "System.String":
+											PSValue = (String)config.Properties[i];
+											break;
+										case "System.Double":
+										case "System.Float":
+										case "System.Single":
+											PSValue = Convert.ToDouble(config.Properties[i]);
+											break;
+										case "System.Int16":
+										case "System.UInt16":
+										case "System.Int32":
+										case "System.UInt32":
+										case "System.Int64":
+										case "System.UInt64":
+											PSValue = (Int64)config.Properties[i];
+											break;
+										case "System.Byte":
+											PSValue = Convert.ToInt32( (byte)config.Properties[i]);
+											break;
+										case "System.DateTime":
+										case "System.DateTimeOffset":
+											PSValue = (string)((DateTimeOffset)config.Properties[i]).ToUniversalTime().ToString("yyyy'-'MM'-'dd'T'HH':'mm':'ss'.'fff");
+											break;
+										case "System.Boolean":
+											PSValue = (bool)config.Properties[i];
+											break;
+										default:
+											PSValue = (string)config.Properties[i];
+											break;
+									}
+									row.Add(PropNames[i], PSValue);
+								}
+							}
 							rows.Add(row);
 						}
 
@@ -270,7 +340,7 @@ namespace DataFeederService
 			}
 			catch (Exception e)
 			{
-				if (e.Message.ToLower().Contains("already exists"))
+				if (e.Message.ToLower().Contains("already exists: table"))
 				{
 					// Can continue if we assume the table has the right columns
 					Logger.Info("Table exists, continuing");
@@ -363,44 +433,7 @@ namespace DataFeederService
 
 			Out.UpdateType = UpdateType;
 
-			// Create/add point update properties
-			int index = 0;
-			foreach (string FieldName in PropertyTranslations.Keys)
-			{
-				switch (FieldName)
-				{
-					case "TypeName":
-						Out.TypeName = (string)PointProperties[index];
-						break;
-					case "BitCount":
-						Out.BitCount = (byte)( PointProperties[index] ?? (byte)0);
-						break;
-					case "FullScale":
-						Out.FullScale = Convert.ToDouble( PointProperties[index] ?? 0.0);
-						break;
-					case "ZeroScale":
-						Out.ZeroScale = Convert.ToDouble( PointProperties[index] ?? 0.0);
-						break;
-					case "Units":
-						Out.Units = (string)( PointProperties[index] ?? "");
-						break;
-					case "Latitude":
-						Out.Latitude = Convert.ToDouble( PointProperties[index] ?? 0.0);
-						break;
-					case "Longitude":
-						Out.Longitude = Convert.ToDouble( PointProperties[index] ?? 0.0);
-						break;
-					case "State0Desc":
-						Out.State0Desc = (string)(PointProperties[index] ?? "");
-						break;
-					case "State1Desc":
-						Out.State1Desc = (string)(PointProperties[index] ?? "");
-						break;
-					default:
-						break;
-				}
-				index++;
-			}
+			Out.Properties = PointProperties;
 
 			WritePointConfig(Out);
 		}
@@ -481,14 +514,6 @@ namespace DataFeederService
 		public string UpdateType;
 		public string PointName;
 		public DateTimeOffset Timestamp;
-		public string TypeName;
-		public Double FullScale;
-		public Double ZeroScale;
-		public string Units;
-		public int BitCount;
-		public Double Latitude;
-		public Double Longitude;
-		public string State0Desc;
-		public string State1Desc;
+		public Object[] Properties;
 	}
 }
