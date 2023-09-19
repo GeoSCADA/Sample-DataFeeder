@@ -13,6 +13,9 @@
 //
 // You could use WIX to create an installer msi which does this.
 // The service optionally takes a command parameter - the filename of the setup file.
+//
+// Note that you should use NuGet manager to select the same version of NLog as used by
+// the Geo SCADA API. Check what version is used in the ClearSCADA program folder.
 
 using System;
 using System.Threading.Tasks;
@@ -386,7 +389,8 @@ namespace DataFeederService
 			// Store Property Translations in a dictionary
 			foreach( string entry in PropertyTranslation.Split('\n'))
 			{
-				string[] elements = entry.Trim().Split('\t');
+				// Replace remove duplicate spaces and replace with tabs 
+				string[] elements = entry.Trim().Replace("  ", " ").Replace("  ", " ").Replace("  ", " ").Replace(' ', '\t').Split('\t');
 				if (elements.Length == 3 && elements[0].Length > 1 && elements[1].Length > 1 && elements[2].Length > 1)
 				{
 					// Ignoring the table name - we retrieve regardless of type and ignore any null fields
@@ -585,9 +589,9 @@ namespace DataFeederService
 				node = new ServerNode(ConnectionType.Standard, Settings.GeoSCADAServerName, Settings.GeoSCADAServerPort);
 				AdvConnection = node.Connect("DataFeeder");
 			}
-			catch
+			catch (Exception e)
 			{
-				Logger.Error("Cannot connect to Geo SCADA Server: " + GeoSCADAServer);
+				Logger.Error("Cannot connect to Geo SCADA Server: " + GeoSCADAServer + " " + e.Message);
 				return false;
 			}
 #pragma warning restore 612, 618
@@ -596,9 +600,9 @@ namespace DataFeederService
 			{
 				AdvConnection.LogOn(User, Password);
 			}
-			catch
+			catch (Exception e)
 			{
-				Logger.Error("Cannot log on to Geo SCADA with user: " + User);
+				Logger.Error("Cannot log on to Geo SCADA with user: " + User + " " + e.Message);
 				return false;
 			}
 			Logger.Info("Logged on.");

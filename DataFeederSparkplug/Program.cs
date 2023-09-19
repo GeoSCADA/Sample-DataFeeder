@@ -13,6 +13,9 @@
 //
 // You could use WIX to create an installer msi which does this.
 // The service optionally takes a command parameter - the filename of the setup file.
+//
+// Note that you should use NuGet manager to select the same version of NLog as used by
+// the Geo SCADA API. Check what version is used in the ClearSCADA program folder.
 
 using System;
 using System.Threading.Tasks;
@@ -393,15 +396,16 @@ namespace DataFeederService
 			{
 				Logger.Error("Unable to read property translation settings from file: " + ConfigPropertyFileName);
 				// Try to write out a default file (this may be inappropriate for your export target)
-				PropertyTranslation = "Units	CSparkplugBPointAnalog	Units\n" +
-									"FullScale CSparkplugBPointAnalog FullScale\n" +
-									"ZeroScale   CSparkplugBPointAnalog ZeroScale\n" +
-									"BitCount CSparkplugBPointDigital BitCount\n" +
-									"State0Desc CSparkplugBPointDigital State0Desc\n" +
-									"State1Desc  CSparkplugBPointDigital State1Desc\n" +
+				PropertyTranslation = "Units\tCPointAlgManual\tUnits\n" +
+									"FullScale\tCPointAlgManual\tFullScale\n" +
+									"ZeroScale\tCPointAlgManual\tZeroScale\n" +
+									"BitCount\tCPointDigitalManual\tBitCount\n" +
+									"State0Desc\tCPointDigitalManual\tState0Desc\n" +
+									"State1Desc\tCPointDigitalManual\tState1Desc\n" +
 									// Note that Geo SCADA Sparkplug Driver ignores these target fields currently
-									"GISLocation.Longitude CSparkplugBPoint    CGISLocationSrcStatic.Longitude\n" +
-									"GISLocation.Latitude CSparkplugBPoint    CGISLocationSrcStatic.Latitude\n";
+									"GISLocation.Longitude\tCDBObject\tLongitude\n" +
+									"GISLocation.Latitude\tCDBObject\tLatitude\n";
+
 				StreamWriter UpdatePTTFile = new StreamWriter(ConfigPropertyFileName);
 				UpdatePTTFile.WriteLine(PropertyTranslation);
 				UpdatePTTFile.Close();
@@ -410,7 +414,8 @@ namespace DataFeederService
 			// Store Property Translations in a dictionary
 			foreach( string entry in PropertyTranslation.Split('\n'))
 			{
-				string[] elements = entry.Trim().Split('\t');
+				// Replace remove duplicate spaces and replace with tabs 
+				string[] elements = entry.Trim().Replace("  ", " ").Replace("  ", " ").Replace("  ", " ").Replace(' ','\t').Split('\t');
 				if (elements.Length == 3 && elements[0].Length > 1 && elements[1].Length > 1 && elements[2].Length > 1)
 				{
 					// Ignoring the table name - we retrieve regardless of type and ignore any null fields
@@ -606,9 +611,9 @@ namespace DataFeederService
 				node = new ServerNode(ConnectionType.Standard, Settings.GeoSCADAServerName, Settings.GeoSCADAServerPort);
 				AdvConnection = node.Connect("DataFeeder");
 			}
-			catch
+			catch (Exception e)
 			{
-				Logger.Error("Cannot connect to Geo SCADA Server: " + GeoSCADAServer);
+				Logger.Error("Cannot connect to Geo SCADA Server: " + GeoSCADAServer + " " + e.Message);
 				return false;
 			}
 #pragma warning restore 612, 618
@@ -617,9 +622,9 @@ namespace DataFeederService
 			{
 				AdvConnection.LogOn(User, Password);
 			}
-			catch
+			catch (Exception e)
 			{
-				Logger.Error("Cannot log on to Geo SCADA with user: " + User);
+				Logger.Error("Cannot log on to Geo SCADA with user: " + User + " " + e.Message);
 				return false;
 			}
 			Logger.Info("Logged on.");
